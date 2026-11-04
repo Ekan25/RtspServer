@@ -21,6 +21,10 @@ final class H264Encoder {
     var onError: ((String) -> Void)?
 
     func start(configuration: VideoStreamConfiguration) throws {
+        try queue.sync { try startLocked(configuration: configuration) }
+    }
+
+    private func startLocked(configuration: VideoStreamConfiguration) throws {
         guard configuration.isValid else { throw StreamError.message("Invalid encoder configuration.") }
         var created: VTCompressionSession?
         let specification = [kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder: true] as CFDictionary
@@ -84,14 +88,26 @@ final class H264Encoder {
         return properties[key as String] != nil
     }
 
-    func updateBitrate(_ bitrate: Int, completion: @escaping (Error?) -> Void) {
-        queue.async {
-            do {
-                guard bitrate > 0 else { throw StreamError.message("Bitrate must be positive.") }
-                try self.set(kVTCompressionPropertyKey_AverageBitRate, bitrate as CFNumber)
-                completion(nil)
-            } catch { completion(error) }
+    func updateBitrate(_ bitrate: Int) throws -> Int? {
+        try queue.sync {
+            guard bitrate > 0 else { throw StreamError.message("Bitrate must be positive.") }
+            try set(kVTCompressionPropertyKey_AverageBitRate, bitrate as CFNumber)
+            return copyEffectiveBitrate()
         }
+    }
+
+    func effectiveBitrate() -> Int? {
+        queue.sync {
+            copyEffectiveBitrate()
+        }
+    }
+
+    private func copyEffectiveBitrate() -> Int? {
+        guard let session else { return nil }
+        var value: CFTypeRef?
+        guard VTSessionCopyProperty(session, key: kVTCompressionPropertyKey_AverageBitRate,
+                                    allocator: kCFAllocatorDefault, valueOut: &value) == noErr else { return nil }
+        return (value as? NSNumber)?.intValue
     }
 
     func requestKeyframe() {

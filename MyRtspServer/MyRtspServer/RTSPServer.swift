@@ -97,11 +97,25 @@ final class RTSPServer {
         queue.sync {
             self.listener?.cancel()
             self.listener = nil
-            for client in self.clients.values { client.connection.cancel() }
-            self.clients.removeAll()
-            self.sps = nil; self.pps = nil
-            self.onClientCount?(0)
+            disconnectAllClients(resetParameters: true)
         }
+    }
+
+    func disconnectClientsForReconfiguration() {
+        queue.sync { disconnectAllClients(resetParameters: true) }
+    }
+
+    private func disconnectAllClients(resetParameters: Bool) {
+        for client in clients.values {
+            if case let .udp(transport) = client.mediaTransport { transport.cancel() }
+            client.connection.cancel()
+        }
+        clients.removeAll()
+        if resetParameters {
+            sps = nil
+            pps = nil
+        }
+        onClientCount?(0)
     }
 
     // At most one access unit can wait for the network queue.

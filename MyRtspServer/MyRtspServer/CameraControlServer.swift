@@ -82,7 +82,13 @@ final class CameraControlServer {
             var line = Data(client.input[..<newline])
             client.input = Data(client.input.dropFirst(newline + 1))
             if line.last == 13 { line.removeLast() }
-            send(handler.handle(line, client: client.id), to: client)
+            handler.handle(line, client: client.id) { [weak self, weak client] response in
+                guard let self, let client else { return }
+                self.queue.async {
+                    guard self.clients[client.id] != nil else { return }
+                    self.send(response, to: client)
+                }
+            }
             guard clients[client.id] != nil else { return }
         }
         if client.input.count > maxLineBytes { rejectOversized(client) }
@@ -91,7 +97,7 @@ final class CameraControlServer {
     private func rejectOversized(_ client: Client) {
         client.closing = true
         let error = CameraResponse.Failure(code: "line_too_long", message: "Request exceeds the line limit.")
-        send(CameraResponse(id: nil, ok: false, status: nil, commands: nil, error: error), to: client, close: true)
+        send(.failure(id: nil, CameraControlError(code: error.code, message: error.message)), to: client, close: true)
     }
 
     private func send(_ response: CameraResponse, to client: Client, close: Bool = false) {

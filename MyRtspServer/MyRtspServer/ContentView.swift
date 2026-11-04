@@ -30,6 +30,8 @@ struct ContentView: View {
                         }
                         Text("Use trusted networks only. Streaming and camera control are not authenticated or encrypted; interface binding does not prevent routed access.")
                             .font(.footnote).foregroundStyle(.secondary)
+                        Text("Keep Awake prevents idle sleep only. It does not keep streaming alive in the background and cannot prevent a manual device lock.")
+                            .font(.footnote).foregroundStyle(.secondary)
                     }
                 }
                 Section("Status") {

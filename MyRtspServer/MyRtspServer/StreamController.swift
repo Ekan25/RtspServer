@@ -38,12 +38,14 @@ final class StreamController: ObservableObject {
     private var encoder: H264Encoder?
     private var server: RTSPServer?
     private var controlServer: CameraControlServer?
+    private var remoteCamera: RemoteCameraController?
     private var generation = 0
     private var timer: Timer?
     private var lastStatistics = Date()
     private var thermalObserver: NSObjectProtocol?
 
     init() {
+        RemoteCameraController.applySavedKeepAwakePreference()
         thermalObserver = NotificationCenter.default.addObserver(forName: ProcessInfo.thermalStateDidChangeNotification, object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor in self?.thermalState = ProcessInfo.processInfo.thermalState }
         }
@@ -107,14 +109,21 @@ final class StreamController: ObservableObject {
                 server.onError = { [weak self] message in
                     DispatchQueue.main.async { self?.fail(message, token: token) }
                 }
-                let control = CameraControlServer(address: address, port: configuration.controlPort, handler: CameraCommandHandler(camera: camera))
+                let remoteCamera = RemoteCameraController(camera: camera, encoder: encoder, server: server, configuration: configuration)
+                remoteCamera.configurationDidChange = { [weak self] updated in
+                    DispatchQueue.main.async {
+                        guard self?.generation == token else { return }
+                        self?.configuration = updated
+                    }
+                }
+                let control = CameraControlServer(address: address, port: configuration.controlPort, handler: CameraCommandHandler(camera: remoteCamera))
                 controlServer = control
                 control.onError = { [weak self] message in
                     DispatchQueue.main.async { self?.fail(message, token: token) }
                 }
                 try server.start()
                 try control.start()
-                self.camera = camera; self.encoder = encoder; self.server = server; self.controlServer = control
+                self.camera = camera; self.encoder = encoder; self.server = server; self.controlServer = control; self.remoteCamera = remoteCamera
                 camera.run()
                 DispatchQueue.main.async {
                     guard self.generation == token else { return }
@@ -146,6 +155,7 @@ final class StreamController: ObservableObject {
         worker.async { [weak self] in
             guard let self else { return }
             self.controlServer?.stop(); self.controlServer = nil
+            self.remoteCamera = nil
             self.server?.stop(); self.server = nil
             self.camera?.stop(); self.camera = nil
             self.encoder?.stop(); self.encoder = nil
@@ -157,11 +167,12 @@ final class StreamController: ObservableObject {
         guard isStreaming, bitrate > 0 else { return }
         let token = generation
         worker.async { [weak self] in
-            self?.encoder?.updateBitrate(bitrate) { [weak self] error in
+            do {
+                _ = try self?.remoteCamera?.setQuality(bitrate: bitrate)
+            } catch {
                 DispatchQueue.main.async {
                     guard let self, self.generation == token else { return }
-                    if let error { self.errorMessage = error.localizedDescription }
-                    else { self.configuration.bitrate = bitrate }
+                    self.errorMessage = error.localizedDescription
                 }
             }
         }
