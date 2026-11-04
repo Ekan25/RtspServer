@@ -24,6 +24,7 @@ final class StreamController: ObservableObject {
     @Published private(set) var droppedFrames = 0
     @Published private(set) var errorMessage: String?
     @Published private(set) var thermalState = ProcessInfo.processInfo.thermalState
+    @Published private(set) var latencyStatistics = LatencyStatistics.empty
     @Published private(set) var url = ""
     @Published private(set) var controlAddress = ""
     @Published var preset: VideoStreamConfiguration.Preset = .default
@@ -31,6 +32,7 @@ final class StreamController: ObservableObject {
 
     private let worker = DispatchQueue(label: "stream.lifecycle", qos: .userInitiated)
     private let counters = StreamCounters()
+    private let diagnostics = LatencyDiagnostics()
     // Accessed only by worker.
     private var camera: CameraCapture?
     private var encoder: H264Encoder?
@@ -75,7 +77,7 @@ final class StreamController: ObservableObject {
             guard let self else { return }
             let camera = CameraCapture()
             let encoder = H264Encoder()
-            let server = RTSPServer(port: configuration.rtspPort)
+            let server = RTSPServer(port: configuration.rtspPort, rtpPayloadSize: configuration.rtpPayloadSize)
             var controlServer: CameraControlServer?
             do {
                 guard let address = Self.localAddress(interface: configuration.controlInterface) else {
@@ -83,7 +85,10 @@ final class StreamController: ObservableObject {
                 }
                 try encoder.start(configuration: configuration)
                 try camera.start(configuration: configuration)
-                camera.onFrame = { [weak encoder] buffer, time in encoder?.encode(buffer, at: time) }
+                camera.makeTrace = { [weak diagnostics = self.diagnostics] in
+                    diagnostics?.makeTrace() ?? FrameTrace(identifier: 0)
+                }
+                camera.onFrame = { [weak encoder] buffer, time, trace in encoder?.encode(buffer, at: time, trace: trace) }
                 camera.onDrop = { counters.drop() }
                 encoder.onDrop = { counters.drop() }
                 encoder.onFrame = { [weak server] frame in
@@ -94,6 +99,7 @@ final class StreamController: ObservableObject {
                     DispatchQueue.main.async { self?.fail(message, token: token) }
                 }
                 server.onDrop = { counters.drop() }
+                server.onTraceComplete = { [weak diagnostics = self.diagnostics] trace in diagnostics?.record(trace) }
                 server.onKeyframeNeeded = { [weak encoder] in encoder?.requestKeyframe() }
                 server.onClientCount = { [weak self] count in
                     DispatchQueue.main.async { if self?.generation == token { self?.clientCount = count } }
@@ -174,6 +180,7 @@ final class StreamController: ObservableObject {
         actualFrameRate = Double(frames) / elapsed
         actualBitrate = Double(bytes * 8) / elapsed
         droppedFrames += drops
+        latencyStatistics = diagnostics.snapshot()
     }
 
     private static func localURL(port: UInt16) -> String {

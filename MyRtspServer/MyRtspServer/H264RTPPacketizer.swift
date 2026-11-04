@@ -14,6 +14,7 @@ final class H264RTPPacketizer {
     private(set) var timestamp: UInt32
     let ssrc = UInt32.random(in: .min ... .max)
     private var firstTime: CMTime?
+    private var firstNTPTime: TimeInterval?
     private var packetCount: UInt32 = 0
     private var octetCount: UInt32 = 0
     private let maxPayload: Int
@@ -25,7 +26,10 @@ final class H264RTPPacketizer {
 
     func packetize(_ units: [Data], at time: CMTime) -> [Data] {
         guard time.isValid, time.isNumeric else { return [] }
-        if firstTime == nil { firstTime = time }
+        if firstTime == nil {
+            firstTime = time
+            firstNTPTime = Date().timeIntervalSince1970 + 2_208_988_800
+        }
         let delta = CMTimeConvertScale(CMTimeSubtract(time, firstTime!), timescale: 90_000, method: .roundTowardZero).value
         timestamp = initialTimestamp &+ UInt32(truncatingIfNeeded: delta)
         let units = units.filter { !$0.isEmpty }
@@ -65,9 +69,10 @@ final class H264RTPPacketizer {
     }
 
     func senderReport() -> Data {
-        let now = Date().timeIntervalSince1970 + 2_208_988_800
-        let seconds = floor(now)
-        let fraction = UInt32((now - seconds) * 4_294_967_296)
+        let ntp = (firstNTPTime ?? Date().timeIntervalSince1970 + 2_208_988_800) +
+            Double(timestamp &- initialTimestamp) / 90_000
+        let seconds = floor(ntp)
+        let fraction = UInt32((ntp - seconds) * 4_294_967_296)
         var report = Data([0x80, 200, 0, 6])
         report.appendBE(ssrc)
         report.appendBE(UInt32(truncatingIfNeeded: UInt64(seconds)))

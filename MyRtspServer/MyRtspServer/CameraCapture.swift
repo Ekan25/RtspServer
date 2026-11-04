@@ -7,8 +7,9 @@ final class CameraCapture: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
     private let configurationQueue = DispatchQueue(label: "camera.configuration", qos: .userInitiated)
     private var device: AVCaptureDevice?
     private var rampOwner: UUID?
-    var onFrame: ((CVPixelBuffer, CMTime) -> Void)?
+    var onFrame: ((CVPixelBuffer, CMTime, FrameTrace) -> Void)?
     var onDrop: (() -> Void)?
+    var makeTrace: (() -> FrameTrace)?
 
     func start(configuration: VideoStreamConfiguration) throws {
         try configurationQueue.sync { try configure(configuration: configuration) }
@@ -46,6 +47,9 @@ final class CameraCapture: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
         output.alwaysDiscardsLateVideoFrames = true
         output.setSampleBufferDelegate(self, queue: captureQueue)
         session.addOutput(output)
+        if let connection = output.connection(with: .video), connection.isVideoStabilizationSupported {
+            connection.preferredVideoStabilizationMode = .off
+        }
         try device.lockForConfiguration()
         device.activeFormat = format
         let duration = CMTime(value: 1, timescale: CMTimeScale(configuration.frameRate))
@@ -91,7 +95,8 @@ final class CameraCapture: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
 
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
-        onFrame?(pixelBuffer, CMSampleBufferGetPresentationTimeStamp(sampleBuffer))
+        guard let trace = makeTrace?() else { return }
+        onFrame?(pixelBuffer, CMSampleBufferGetPresentationTimeStamp(sampleBuffer), trace)
     }
 
     func captureOutput(_ output: AVCaptureOutput, didDrop sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {

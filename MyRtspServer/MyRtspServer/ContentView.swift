@@ -41,6 +41,13 @@ struct ContentView: View {
                     LabeledContent("Thermal state", value: thermalDescription)
                 }
                 if stream.isStreaming {
+                    Section("Latency diagnostics") {
+                        LabeledContent("Server processing avg / p95", value: latency(stream.latencyStatistics.total))
+                        LabeledContent("Capture to encode p95", value: latencySum(stream.latencyStatistics.captureToSubmit, stream.latencyStatistics.submitToEncode))
+                        LabeledContent("Packetize to network p95", value: latencySum(stream.latencyStatistics.encodeToPacketize, stream.latencyStatistics.packetizeToNetwork))
+                    }
+                }
+                if stream.isStreaming {
                     Section("Bitrate") {
                         Stepper(String(format: "Target: %.1f Mbps", bitrateMbps), value: $bitrateMbps, in: 0.5...20, step: 0.5)
                         Button("Apply bitrate") { stream.updateBitrate(Int(bitrateMbps * 1_000_000)) }
@@ -65,6 +72,16 @@ struct ContentView: View {
         case .critical: return "Critical"
         @unknown default: return "Unknown"
         }
+    }
+
+    private func latency(_ summary: LatencySummary) -> String {
+        guard summary.count > 0 else { return "Waiting for client" }
+        return String(format: "%.1f / %.1f ms", summary.average, summary.p95)
+    }
+
+    private func latencySum(_ first: LatencySummary, _ second: LatencySummary) -> String {
+        guard first.count > 0, second.count > 0 else { return "—" }
+        return String(format: "%.1f ms", first.p95 + second.p95)
     }
 }
 
