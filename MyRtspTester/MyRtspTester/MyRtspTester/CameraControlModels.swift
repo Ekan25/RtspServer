@@ -8,6 +8,7 @@ enum CameraCommand: String, Codable, Sendable {
     case setFocusMode, setFocus
     case getCameras, setCamera, getZoomCapabilities
     case setTorch, setTorchLevel
+    case startStream, stopStream, getStreamStatus
 }
 
 struct CameraControlRequest: Encodable, Sendable {
@@ -122,6 +123,15 @@ struct CameraKeepAwakeStatus: Codable, Sendable, Equatable {
     let enabled: Bool
 }
 
+enum CameraStreamState: String, Codable, Sendable, Equatable {
+    case stopped, starting, running, stopping, error
+}
+
+struct CameraStreamStatus: Codable, Sendable, Equatable {
+    let state: CameraStreamState
+    let message: String?
+}
+
 struct CameraStatus: Codable, Sendable, Equatable {
     let camera: CameraDescriptor
     let videoMode: CameraVideoMode
@@ -174,6 +184,8 @@ struct CameraControlResponse: Codable, Sendable {
     let focus: CameraFocusStatus?
     let torch: CameraTorchStatus?
     let keepAwake: CameraKeepAwakeStatus?
+    let stream: CameraStreamStatus?
+    let event: String?
     let commands: [String]?
     let error: CameraControlErrorResponse?
 }

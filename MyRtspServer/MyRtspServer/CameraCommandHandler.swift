@@ -70,6 +70,19 @@ struct CameraKeepAwakeStatus: Codable, Equatable {
     let enabled: Bool
 }
 
+enum CameraStreamState: String, Codable, Equatable {
+    case stopped
+    case starting
+    case running
+    case stopping
+    case error
+}
+
+struct CameraStreamStatus: Codable, Equatable {
+    let state: CameraStreamState
+    let message: String?
+}
+
 struct CameraStatus: Codable, Equatable {
     let camera: CameraDescriptor
     let videoMode: CameraVideoMode
@@ -182,6 +195,8 @@ struct CameraResponse: Encodable {
     let focus: CameraFocusStatus?
     let torch: CameraTorchStatus?
     let keepAwake: CameraKeepAwakeStatus?
+    let stream: CameraStreamStatus?
+    let event: String?
     let commands: [String]?
     let error: Failure?
 
@@ -201,32 +216,133 @@ struct CameraResponse: Encodable {
         focus: CameraFocusStatus? = nil,
         torch: CameraTorchStatus? = nil,
         keepAwake: CameraKeepAwakeStatus? = nil,
-        commands: [String]? = nil
+        commands: [String]? = nil,
+        stream: CameraStreamStatus? = nil,
+        event: String? = nil
     ) -> Self {
         .init(id: id, ok: true, status: status, capabilities: capabilities, videoModes: videoModes, quality: quality,
-              cameras: cameras, zoom: zoom, focus: focus, torch: torch, keepAwake: keepAwake, commands: commands, error: nil)
+              cameras: cameras, zoom: zoom, focus: focus, torch: torch, keepAwake: keepAwake, stream: stream, event: event,
+              commands: commands, error: nil)
     }
 
     static func failure(id: CameraRequestID?, _ error: CameraControlError) -> Self {
         .init(id: id, ok: false, status: nil, capabilities: nil, videoModes: nil, quality: nil, cameras: nil, zoom: nil,
-              focus: nil, torch: nil, keepAwake: nil, commands: nil, error: .init(code: error.code, message: error.message))
+              focus: nil, torch: nil, keepAwake: nil, stream: nil, event: nil, commands: nil,
+              error: .init(code: error.code, message: error.message))
     }
 }
 
+protocol CameraStreamControlling: AnyObject {
+    func startStream(completion: @escaping (Result<CameraStreamStatus, CameraControlError>) -> Void)
+    func stopStream(completion: @escaping (Result<CameraStreamStatus, CameraControlError>) -> Void)
+    func streamStatus() -> CameraStreamStatus
+}
+
 final class CameraCommandHandler {
-    private let camera: CameraRemoteControlling
+    private let cameraProvider: () -> CameraRemoteControlling?
+    private weak var stream: CameraStreamControlling?
     private let queue = DispatchQueue(label: "camera.control.commands", qos: .userInitiated)
 
-    init(camera: CameraRemoteControlling) { self.camera = camera }
+    init(cameraProvider: @escaping () -> CameraRemoteControlling?, stream: CameraStreamControlling) {
+        self.cameraProvider = cameraProvider
+        self.stream = stream
+    }
 
     func handle(_ data: Data, client: UUID, completion: @escaping (CameraResponse) -> Void) {
-        queue.async { [camera] in
+        if let streamCommand = Self.streamCommand(data) {
+            handle(streamCommand, completion: completion)
+            return
+        }
+        queue.async { [cameraProvider] in
+            guard let camera = cameraProvider() else {
+                completion(.failure(id: Self.requestID(from: data), CameraControlError(
+                    code: "stream_not_running",
+                    message: "Camera controls are unavailable while the stream is stopped."
+                )))
+                return
+            }
             completion(Self.handle(data, client: client, camera: camera))
         }
     }
 
     func disconnected(_ client: UUID) {
-        queue.async { [camera] in _ = try? camera.stopZoom(owner: client) }
+        queue.async { [cameraProvider] in _ = try? cameraProvider()?.stopZoom(owner: client) }
+    }
+
+    private enum StreamCommand {
+        case start(id: CameraRequestID?)
+        case stop(id: CameraRequestID?)
+        case status(id: CameraRequestID?)
+        case invalid(id: CameraRequestID?)
+
+        var id: CameraRequestID? {
+            switch self {
+            case let .start(id), let .stop(id), let .status(id), let .invalid(id): return id
+            }
+        }
+    }
+
+    private func handle(_ command: StreamCommand, completion: @escaping (CameraResponse) -> Void) {
+        guard let stream else {
+            completion(.failure(id: command.id, CameraControlError(code: "unavailable", message: "Stream control is unavailable.")))
+            return
+        }
+        switch command {
+        case let .start(id):
+            stream.startStream { result in
+                switch result {
+                case let .success(status):
+                    completion(.success(id: id, stream: status))
+                case let .failure(error):
+                    completion(.failure(id: id, error))
+                }
+            }
+        case let .stop(id):
+            stream.stopStream { result in
+                switch result {
+                case let .success(status):
+                    completion(.success(id: id, stream: status))
+                case let .failure(error):
+                    completion(.failure(id: id, error))
+                }
+            }
+        case let .status(id):
+            completion(.success(id: id, stream: stream.streamStatus()))
+        case let .invalid(id):
+            completion(.failure(id: id, Self.invalidParameters()))
+        }
+    }
+
+    private static func streamCommand(_ data: Data) -> StreamCommand? {
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let command = object["command"] as? String else { return nil }
+        let id = requestID(from: data)
+        let allowed = Set(["id", "command"])
+        guard Set(object.keys).isSubset(of: allowed) else {
+            switch command {
+            case "startStream", "stopStream", "getStreamStatus": return .invalid(id: id)
+            default: return nil
+            }
+        }
+        switch command {
+        case "startStream": return .start(id: id)
+        case "stopStream": return .stop(id: id)
+        case "getStreamStatus": return .status(id: id)
+        default: return nil
+        }
+    }
+
+    private static func requestID(from data: Data) -> CameraRequestID? {
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let rawID = object["id"] else { return nil }
+        if let string = rawID as? String { return .string(string) }
+        guard let number = rawID as? NSNumber,
+              CFGetTypeID(number) != CFBooleanGetTypeID(),
+              number.doubleValue.isFinite,
+              number.doubleValue.rounded() == number.doubleValue,
+              number.doubleValue >= Double(Int.min),
+              number.doubleValue <= Double(Int.max) else { return nil }
+        return .number(number.intValue)
     }
 
     private static func handle(_ data: Data, client: UUID, camera: CameraRemoteControlling) -> CameraResponse {

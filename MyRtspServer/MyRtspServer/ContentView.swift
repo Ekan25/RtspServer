@@ -9,6 +9,12 @@ struct ContentView: View {
         NavigationStack {
             Form {
                 Section("Stream") {
+                    TextField("Camera name", text: Binding(
+                        get: { stream.cameraName },
+                        set: { stream.setCameraName($0) }
+                    ))
+                    .textInputAutocapitalization(.words)
+                    .disabled(stream.isStreaming || stream.isBusy)
                     Picker("Preset", selection: $stream.preset) {
                         ForEach(VideoStreamConfiguration.Preset.allCases) { preset in
                             Text(preset.rawValue).tag(preset)
@@ -21,12 +27,14 @@ struct ContentView: View {
                     }
                     .disabled(stream.isBusy)
                     if stream.isBusy { ProgressView() }
+                    if !stream.controlAddress.isEmpty {
+                        LabeledContent("Camera control") {
+                            Text(stream.controlAddress).textSelection(.enabled).font(.footnote)
+                        }
+                    }
                     if stream.isStreaming {
                         LabeledContent("RTSP URL") {
                             Text(stream.url).textSelection(.enabled).font(.footnote)
-                        }
-                        LabeledContent("Camera control") {
-                            Text(stream.controlAddress).textSelection(.enabled).font(.footnote)
                         }
                         Text("Use trusted networks only. Streaming and camera control are not authenticated or encrypted; interface binding does not prevent routed access.")
                             .font(.footnote).foregroundStyle(.secondary)
@@ -35,6 +43,7 @@ struct ContentView: View {
                     }
                 }
                 Section("Status") {
+                    LabeledContent("Stream state", value: stream.streamState.rawValue.capitalized)
                     LabeledContent("Clients", value: "\(stream.clientCount)")
                     LabeledContent("Resolution", value: "\(stream.configuration.width) × \(stream.configuration.height)")
                     LabeledContent("Frame rate", value: String(format: "%.1f / %d fps", stream.actualFrameRate, stream.configuration.frameRate))

@@ -18,6 +18,7 @@ public sealed class CameraControlClient : IAsyncDisposable
 
     public event EventHandler? ConnectionChanged;
     public event EventHandler<string>? Error;
+    public event EventHandler<CameraStreamStatus>? StreamStateChanged;
 
     public bool IsConnected
     {
@@ -340,6 +341,11 @@ public sealed class CameraControlClient : IAsyncDisposable
 
             if (string.IsNullOrEmpty(id))
             {
+                if (response.Event == "streamStateChanged" && response.Stream is not null)
+                {
+                    StreamStateChanged?.Invoke(this, response.Stream);
+                    return;
+                }
                 string detail = response.Error is null ? "" :
                     $" {response.Error.Code}: {response.Error.Message}";
                 throw new IOException("Received a response without a request ID." + detail);

@@ -48,6 +48,7 @@ final class GStreamerPlayerViewModel: NSObject, ObservableObject {
 
     private let player = GStreamerVideoPlayer()
     private var host = ""
+    private var discoveredURL: String?
     private weak var renderView: NSView?
 
     init(defaults: UserDefaults = .standard) {
@@ -72,6 +73,9 @@ final class GStreamerPlayerViewModel: NSObject, ObservableObject {
         if !override.isEmpty {
             return override
         }
+        if let discoveredURL {
+            return discoveredURL
+        }
         let trimmedHost = host.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmedHost.isEmpty ? "" : "rtsp://\(trimmedHost):8554/camera"
     }
@@ -80,6 +84,16 @@ final class GStreamerPlayerViewModel: NSObject, ObservableObject {
         let newHost = host.trimmingCharacters(in: .whitespacesAndNewlines)
         guard self.host != newHost else { return }
         self.host = newHost
+        if playbackState == .playing || playbackState == .connecting || playbackState == .reconnecting {
+            start()
+        }
+    }
+
+    func updateDiscoveredURL(_ url: String?) {
+        let trimmedURL = url?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let newURL = trimmedURL?.isEmpty == false ? trimmedURL : nil
+        guard discoveredURL != newURL else { return }
+        discoveredURL = newURL
         if playbackState == .playing || playbackState == .connecting || playbackState == .reconnecting {
             start()
         }

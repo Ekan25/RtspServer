@@ -4,6 +4,7 @@ import SwiftUI
 struct ContentView: View {
     @StateObject private var viewModel = CameraViewModel()
     @StateObject private var videoPlayer = GStreamerPlayerViewModel()
+    @StateObject private var discovery = CameraDiscovery()
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
@@ -16,6 +17,7 @@ struct ContentView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
                     connectionSection
+                    discoveredCamerasSection
                     playbackControlsSection
                     if let errorMessage = viewModel.errorMessage {
                         Label(errorMessage, systemImage: "exclamationmark.triangle.fill")
@@ -36,7 +38,36 @@ struct ContentView: View {
         .frame(minWidth: 1_000, minHeight: 640)
         .onChange(of: scenePhase) { _, phase in if phase != .active { viewModel.windowDidLoseFocus() } }
         .onChange(of: viewModel.host) { _, host in videoPlayer.updateHost(host) }
-        .onAppear { videoPlayer.updateHost(viewModel.host) }
+        .onChange(of: viewModel.connectionState) { _, state in discovery.updateControlConnectionState(state) }
+        .onChange(of: viewModel.autoConnect) { _, enabled in
+            if enabled { selectSavedCameraIfAvailable() }
+        }
+        .onChange(of: viewModel.autoStream) { _, enabled in
+            if enabled, viewModel.isConnected { viewModel.refresh() }
+        }
+        .onChange(of: discovery.cameras) { _, _ in selectSavedCameraIfAvailable() }
+        .onChange(of: discovery.resolvedEndpoint) { _, endpoint in
+            guard let endpoint else { return }
+            videoPlayer.updateDiscoveredURL(endpoint.rtspURL)
+            viewModel.connectDiscoveredCamera(endpoint)
+        }
+        .onChange(of: viewModel.streamStatus) { _, status in
+            guard viewModel.autoStream else { return }
+            switch status?.state {
+            case .running:
+                videoPlayer.start()
+            case .stopped, .stopping:
+                videoPlayer.stop()
+            case .starting, .error, nil:
+                break
+            }
+        }
+        .onAppear {
+            videoPlayer.updateHost(viewModel.host)
+            discovery.start()
+            selectSavedCameraIfAvailable()
+        }
+        .onDisappear { discovery.stop() }
     }
 
     private var videoPreviewSection: some View {
@@ -137,7 +168,7 @@ struct ContentView: View {
     }
 
     private var connectionSection: some View {
-        GroupBox("Connection") {
+        GroupBox("Manual Connection") {
             Grid(alignment: .leading, verticalSpacing: 10) {
                 GridRow {
                     Text("Address")
@@ -154,11 +185,61 @@ struct ContentView: View {
                 Label(connectionStatusText, systemImage: connectionStatusSymbol).foregroundStyle(connectionStatusColor)
                 Spacer()
                 if viewModel.isConnected {
-                    Button("Disconnect", role: .destructive) { viewModel.disconnect() }
+                    Button("Disconnect", role: .destructive) {
+                        discovery.clearSelection()
+                        viewModel.disconnect()
+                    }
                 } else {
-                    Button("Connect") { viewModel.connect() }.disabled(viewModel.connectionState == .connecting)
+                    Button("Connect") { connectManually() }.disabled(viewModel.connectionState == .connecting)
                 }
             }.padding(.top, 8)
+        }
+    }
+
+    private var discoveredCamerasSection: some View {
+        GroupBox("Discovered Cameras") {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Label(discoveryStatusText, systemImage: discoveryStatusSymbol)
+                        .foregroundStyle(discoveryStatusColor)
+                    Spacer()
+                    Button(discovery.state == .stopped ? "Start" : "Stop") {
+                        if discovery.state == .stopped { discovery.start() }
+                        else { discovery.stop() }
+                    }
+                }
+
+                if discovery.cameras.isEmpty {
+                    Text("No cameras found on the local network.")
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(discovery.cameras) { camera in
+                        Button { select(camera) } label: {
+                            HStack(alignment: .firstTextBaseline) {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(camera.name)
+                                    Text(camera.id.uuidString.lowercased())
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                Text(camera.connectionState.label)
+                                    .font(.caption)
+                                    .foregroundStyle(cameraStatusColor(camera.connectionState))
+                                if discovery.selectedCameraID == camera.id {
+                                    Image(systemName: "checkmark.circle.fill")
+                                        .foregroundStyle(Color.accentColor)
+                                }
+                            }
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(camera.connectionState == .resolving)
+                    }
+                    Toggle("Auto Connect", isOn: $viewModel.autoConnect)
+                    Toggle("Auto Stream", isOn: $viewModel.autoStream)
+                }
+            }
         }
     }
 
@@ -177,6 +258,16 @@ struct ContentView: View {
                     Text("Connect to load camera status.").foregroundStyle(.secondary)
                 }
                 HStack { Spacer(); Button("Refresh") { viewModel.refresh() }.disabled(!viewModel.isConnected) }
+                if let streamStatus = viewModel.streamStatus {
+                    LabeledContent("Stream", value: streamStatus.state.rawValue.capitalized)
+                    if let message = streamStatus.message, !message.isEmpty {
+                        Text(message).font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+                HStack {
+                    Button("Start Stream") { viewModel.startStream() }.disabled(!viewModel.canStartStream)
+                    Button("Stop Stream", role: .destructive) { viewModel.stopStream() }.disabled(!viewModel.canStopStream)
+                }
             }
         }
     }
@@ -284,6 +375,58 @@ struct ContentView: View {
         case .connected: .green
         case .connecting: .orange
         case .disconnected, .failed: .secondary
+        }
+    }
+
+    private func connectManually() {
+        discovery.clearSelection()
+        videoPlayer.updateDiscoveredURL(nil)
+        viewModel.connect()
+    }
+
+    private func select(_ camera: DiscoveredCamera) {
+        viewModel.selectDiscoveredCamera(camera.id)
+        discovery.select(camera)
+    }
+
+    private func selectSavedCameraIfAvailable() {
+        guard viewModel.shouldAutoConnect,
+              let identifier = viewModel.selectedCameraID,
+              let camera = discovery.cameras.first(where: { $0.id == identifier }),
+              discovery.selectedCameraID != identifier else { return }
+        discovery.select(camera)
+    }
+
+    private var discoveryStatusText: String {
+        switch discovery.state {
+        case .stopped: "Discovery stopped"
+        case .browsing: "Searching local network"
+        case let .failed(message): message
+        }
+    }
+
+    private var discoveryStatusSymbol: String {
+        switch discovery.state {
+        case .stopped: "pause.circle"
+        case .browsing: "dot.radiowaves.left.and.right"
+        case .failed: "exclamationmark.triangle.fill"
+        }
+    }
+
+    private var discoveryStatusColor: Color {
+        switch discovery.state {
+        case .stopped: .secondary
+        case .browsing: .orange
+        case .failed: .red
+        }
+    }
+
+    private func cameraStatusColor(_ state: DiscoveredCameraConnectionState) -> Color {
+        switch state {
+        case .available: .secondary
+        case .resolving, .connecting: .orange
+        case .connected: .green
+        case .failed: .red
         }
     }
 }

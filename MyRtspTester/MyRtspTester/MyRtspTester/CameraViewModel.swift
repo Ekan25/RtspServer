@@ -24,20 +24,41 @@ final class CameraViewModel: ObservableObject {
     @Published var manualFocusPosition = 0.5
     @Published var torchEnabled = false
     @Published var torchLevel = 1.0
+    @Published var autoConnect: Bool {
+        didSet {
+            defaults.set(autoConnect, forKey: Keys.autoConnect)
+            reconnectTask?.cancel()
+            if autoConnect { manualDisconnect = false }
+        }
+    }
+    @Published var autoStream: Bool { didSet { defaults.set(autoStream, forKey: Keys.autoStream) } }
+    @Published private(set) var streamStatus: CameraStreamStatus?
+    @Published private(set) var selectedCameraID: UUID?
 
+    private let defaults: UserDefaults
     private let client = CameraControlClient()
     private var eventTask: Task<Void, Never>?
     private var sliderTask: Task<Void, Never>?
+    private var reconnectTask: Task<Void, Never>?
     private var isLoadingInitialState = false
+    private var isEnsuringStream = false
+    private var activeDiscoveredEndpoint: ResolvedCameraEndpoint?
+    private var manualDisconnect = false
+    private var manuallyStoppedStream = false
+    private var reconnectAttempt = 0
 
     init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
         host = defaults.string(forKey: Keys.host) ?? ""
         let savedPort = defaults.integer(forKey: Keys.port)
         portText = String(savedPort == 0 ? 8555 : savedPort)
+        autoConnect = defaults.object(forKey: Keys.autoConnect) as? Bool ?? true
+        autoStream = defaults.bool(forKey: Keys.autoStream)
+        selectedCameraID = defaults.string(forKey: Keys.selectedCameraID).flatMap(UUID.init(uuidString:))
         observeClientEvents()
     }
 
-    deinit { eventTask?.cancel(); sliderTask?.cancel() }
+    deinit { eventTask?.cancel(); sliderTask?.cancel(); reconnectTask?.cancel() }
 
     var isConnected: Bool { connectionState == .connected }
     var zoomRange: ClosedRange<Double> {
@@ -55,19 +76,40 @@ final class CameraViewModel: ObservableObject {
     var canSetFocus: Bool { isConnected && can(.setFocusMode) }
     var canSetManualFocus: Bool { canSetFocus && (status?.focus.supportsManual ?? false) && selectedFocusMode == "manual" }
     var canSetTorch: Bool { isConnected && can(.setTorch) && (status?.torch.available ?? false) }
+    var canStartStream: Bool { isConnected && streamStatus?.state != .running && streamStatus?.state != .starting }
+    var canStopStream: Bool { isConnected && streamStatus?.state != .stopped && streamStatus?.state != .stopping }
+    var shouldAutoConnect: Bool { autoConnect && !manualDisconnect && selectedCameraID != nil }
 
     func connect() {
         guard let port = UInt16(portText), port > 0 else { errorMessage = "Enter a TCP port from 1 to 65535."; return }
         let trimmedHost = host.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedHost.isEmpty else { errorMessage = "Enter an IP address or hostname."; return }
-        UserDefaults.standard.set(trimmedHost, forKey: Keys.host)
-        UserDefaults.standard.set(Int(port), forKey: Keys.port)
-        host = trimmedHost; errorMessage = nil; status = nil; capabilities = nil; supportedCommands.removeAll()
-        Task { await client.connect(host: trimmedHost, port: port) }
+        activeDiscoveredEndpoint = nil
+        manualDisconnect = true
+        connect(host: trimmedHost, port: port, saveAsManualConnection: true)
+    }
+
+    func selectDiscoveredCamera(_ identifier: UUID) {
+        selectedCameraID = identifier
+        defaults.set(identifier.uuidString.lowercased(), forKey: Keys.selectedCameraID)
+        manualDisconnect = false
+        manuallyStoppedStream = false
+    }
+
+    func connectDiscoveredCamera(_ endpoint: ResolvedCameraEndpoint) {
+        guard selectedCameraID == endpoint.id else { return }
+        activeDiscoveredEndpoint = endpoint
+        manualDisconnect = false
+        reconnectAttempt = 0
+        reconnectTask?.cancel()
+        connect(host: endpoint.controlHost, port: endpoint.controlPort, saveAsManualConnection: false)
     }
 
     func disconnect() {
         sliderTask?.cancel(); activeZoomDirection = nil
+        reconnectTask?.cancel()
+        manualDisconnect = true
+        activeDiscoveredEndpoint = nil
         Task {
             if isConnected, can(.stopZoom) { _ = try? await client.request(.stopZoom(id: requestID())) }
             await client.disconnect()
@@ -75,6 +117,25 @@ final class CameraViewModel: ObservableObject {
     }
 
     func refresh() { guard isConnected else { return }; errorMessage = nil; Task { await loadInitialState() } }
+
+    func startStream() {
+        guard isConnected else { return }
+        manuallyStoppedStream = false
+        Task { await ensureStreamRunning() }
+    }
+
+    func stopStream() {
+        guard isConnected else { return }
+        manuallyStoppedStream = true
+        Task {
+            do {
+                let response = try await client.request(.init(id: requestID(), command: .stopStream), timeout: .seconds(15))
+                apply(response)
+            } catch {
+                show(error)
+            }
+        }
+    }
 
     func userChangedZoom(to factor: Double) {
         guard canControlZoom else { return }
@@ -160,6 +221,26 @@ final class CameraViewModel: ObservableObject {
 
     func windowDidLoseFocus() { stopZoom() }
 
+    private func connect(host: String, port: UInt16, saveAsManualConnection: Bool) {
+        let trimmedHost = host.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedHost.isEmpty else {
+            errorMessage = "Could not resolve a camera address."
+            return
+        }
+        if saveAsManualConnection {
+            UserDefaults.standard.set(trimmedHost, forKey: Keys.host)
+            UserDefaults.standard.set(Int(port), forKey: Keys.port)
+        }
+        self.host = trimmedHost
+        portText = String(port)
+        errorMessage = nil
+        status = nil
+        capabilities = nil
+        supportedCommands.removeAll()
+        streamStatus = nil
+        Task { await client.connect(host: trimmedHost, port: port) }
+    }
+
     private func can(_ command: CameraCommand) -> Bool { supportedCommands.contains(command.rawValue) }
 
     private func observeClientEvents() {
@@ -173,13 +254,28 @@ final class CameraViewModel: ObservableObject {
     }
 
     private func handle(_ event: CameraControlClientEvent) {
+        let previousState = connectionState
         switch event {
         case let .state(state):
             connectionState = state
-            if case .connected = state { Task { await loadInitialState() } }
-            if case .disconnected = state { activeZoomDirection = nil }
-            if case let .failed(message) = state { activeZoomDirection = nil; errorMessage = message }
+            if case .connected = state {
+                reconnectAttempt = 0
+                reconnectTask?.cancel()
+                Task { await loadInitialState() }
+            }
+            if case .disconnected = state {
+                activeZoomDirection = nil
+                if previousState != .connecting { scheduleReconnectIfNeeded() }
+            }
+            if case let .failed(message) = state {
+                activeZoomDirection = nil
+                errorMessage = message
+                scheduleReconnectIfNeeded()
+            }
         case let .error(message): errorMessage = message
+        case let .streamState(status):
+            streamStatus = status
+            if status.state == .running { Task { await loadCameraState() } }
         }
     }
 
@@ -188,9 +284,55 @@ final class CameraViewModel: ObservableObject {
         isLoadingInitialState = true
         defer { isLoadingInitialState = false }
         do {
+            let response = try await client.request(.init(id: requestID(), command: .getStreamStatus))
+            apply(response)
+            if autoStream, !manuallyStoppedStream {
+                await ensureStreamRunning()
+            } else if streamStatus?.state == .running {
+                await loadCameraState()
+            }
+        } catch { show(error) }
+    }
+
+    private func ensureStreamRunning() async {
+        guard isConnected, !isEnsuringStream, !manuallyStoppedStream else { return }
+        isEnsuringStream = true
+        defer { isEnsuringStream = false }
+        do {
+            if streamStatus?.state != .running {
+                let response = try await client.request(.init(id: requestID(), command: .startStream), timeout: .seconds(20))
+                apply(response)
+            }
+            if streamStatus?.state == .running {
+                await loadCameraState()
+            }
+        } catch { show(error) }
+    }
+
+    private func loadCameraState() async {
+        do {
             apply(try await client.request(.capabilities(id: requestID())))
             apply(try await client.request(.status(id: requestID())))
         } catch { show(error) }
+    }
+
+    private func scheduleReconnectIfNeeded() {
+        guard autoConnect, !manualDisconnect, let endpoint = activeDiscoveredEndpoint else { return }
+        reconnectTask?.cancel()
+        let delay = min(pow(2, Double(reconnectAttempt)), 30)
+        reconnectAttempt = min(reconnectAttempt + 1, 5)
+        reconnectTask = Task { [weak self] in
+            do {
+                try await Task.sleep(for: .seconds(delay))
+                guard !Task.isCancelled, let self,
+                      self.autoConnect, !self.manualDisconnect,
+                      self.connectionState != .connected else { return }
+                self.connectDiscoveredCamera(endpoint)
+            } catch is CancellationError {
+            } catch {
+                self?.show(error)
+            }
+        }
     }
 
     private func apply(_ response: CameraControlResponse) {
@@ -201,6 +343,7 @@ final class CameraViewModel: ObservableObject {
             if selectedVideoModeID.isEmpty, let first = capabilities.videoModes.first { selectedVideoModeID = first.id }
         }
         if let commands = response.commands { supportedCommands.formUnion(commands) }
+        if let stream = response.stream { streamStatus = stream }
         if let status = response.status {
             applyStatus(status)
         }
@@ -248,5 +391,8 @@ final class CameraViewModel: ObservableObject {
     private enum Keys {
         static let host = "cameraControl.host"
         static let port = "cameraControl.port"
+        static let autoConnect = "cameraControl.autoConnect"
+        static let autoStream = "cameraControl.autoStream"
+        static let selectedCameraID = "cameraControl.selectedCameraID"
     }
 }

@@ -30,11 +30,27 @@ public sealed class CameraResponse
     [JsonPropertyName("commands")]
     public string[]? Commands { get; init; }
 
+    [JsonPropertyName("stream")]
+    public CameraStreamStatus? Stream { get; init; }
+
+    [JsonPropertyName("event")]
+    public string? Event { get; init; }
+
     [JsonPropertyName("error")]
     public CameraError? Error { get; init; }
 
     [JsonExtensionData]
     public Dictionary<string, JsonElement> Properties { get; init; } = new();
+}
+
+public sealed class CameraStreamStatus
+{
+    [JsonPropertyName("state")]
+    [JsonRequired]
+    public string State { get; init; } = "";
+
+    [JsonPropertyName("message")]
+    public string? Message { get; init; }
 }
 
 public sealed class CameraStatus
