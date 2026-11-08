@@ -47,6 +47,8 @@ Status definitions:
 | Bonjour discovery | Planned | Not present in the merged Windows implementation |
 | Auto Connect | Implemented | Persisted manual endpoint |
 | Auto Stream | Implemented | Explicit stop suppresses automatic start for the connection lifecycle |
+| Front/rear camera switching | Implemented | Capability-gated; refreshes active-camera modes after switching; physical-device verification pending |
+| Resolution and frame-rate selection | Implemented | Uses advertised active-camera ranges and whole-number fps; playback reconnects after reconfiguration; physical-device verification pending |
 | High-resolution image reception | Implemented | Authenticated `LVP1` TCP transfer; JPEG and BGRA with bounded payload and validated dimensions/stride; physical-device verification pending |
 | Image magnification | Partial | Aspect-preserving preview; dedicated zoom interaction not implemented |
 | Save image dialog | Implemented | JPEG saved directly; BGRA converted to PNG; physical-device verification pending |
@@ -56,6 +58,7 @@ Status definitions:
 - Photo capture requires physical-device verification for camera-specific maximum resolution, concurrent RTSP behavior, and BGRA channel/stride output.
 - Image transfer v1 is plaintext and intended only for trusted local networks; see `docs/protocol.md`.
 - Windows photo transfer and WPF preview have loopback/UI coverage, but still need physical iPhone verification for full-resolution capture, concurrent RTSP behavior, and BGRA channel/stride output.
+- Windows camera switching and video mode selection have loopback/UI coverage; physical iPhone verification, including playback reconnection and impact on other RTSP viewers, is pending.
 
 ## Next Steps
 

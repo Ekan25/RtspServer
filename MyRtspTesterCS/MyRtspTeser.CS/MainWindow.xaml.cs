@@ -21,6 +21,8 @@ public partial class MainWindow : Window
     private Task _stopTask = Task.CompletedTask;
     private CancellationTokenSource? _sliderCancellation;
     private bool _updatingSlider;
+    private bool _updatingCameraControls;
+    private bool _reconfiguring;
     private bool _busy;
     private bool _connecting;
     private bool _closing;
@@ -786,7 +788,7 @@ public partial class MainWindow : Window
 
     private async Task<CameraResponse?> RunCommandAsync(
         CameraSession session, string command, object? parameters = null,
-        CancellationToken cancellationToken = default, long? revision = null)
+        CancellationToken cancellationToken = default, long? revision = null, TimeSpan? timeout = null)
     {
         if (!IsCurrent(session))
             return null;
@@ -799,7 +801,9 @@ public partial class MainWindow : Window
             {
                 if (!IsCurrent(session))
                     return null;
-                CameraResponse response = await _client.SendCommandAsync(command, parameters, linked.Token);
+                CameraResponse response = timeout is { } duration
+                    ? await _client.SendCommandWithTimeoutAsync(command, parameters, duration, linked.Token)
+                    : await _client.SendCommandAsync(command, parameters, linked.Token);
                 if (IsCurrent(session) && !linked.IsCancellationRequested)
                 {
                     await Dispatcher.InvokeAsync(() =>
@@ -835,6 +839,28 @@ public partial class MainWindow : Window
         if (revision.HasValue && revision.Value != session.Revision)
             return;
 
+        CameraCapabilities? capabilities = response.Capabilities;
+        if (capabilities?.Commands is { } commands)
+        {
+            if (commands.Any(command => command is null))
+                throw new InvalidDataException("The camera reported invalid commands.");
+            session.Commands.UnionWith(commands);
+        }
+        CameraDescriptor[]? cameras = response.Cameras ?? capabilities?.Cameras;
+        CameraVideoMode[]? modes = response.VideoModes ?? capabilities?.VideoModes;
+        if (cameras is not null)
+        {
+            if (cameras.Any(camera => camera is null || camera.Position is not ("front" or "back")))
+                throw new InvalidDataException("The camera reported invalid camera positions.");
+            session.Cameras = cameras;
+        }
+        if (modes is not null)
+        {
+            if (modes.Any(mode => mode is null || !IsValidVideoMode(mode)))
+                throw new InvalidDataException("The camera reported invalid video modes.");
+            session.VideoModes = modes;
+        }
+
         CameraStreamStatus? streamStatus = response.Stream ?? response.StreamStatus;
         if (streamStatus is not null)
         {
@@ -843,8 +869,10 @@ public partial class MainWindow : Window
                 VideoStateTextBlock.Text = streamStatus.State;
         }
 
-        if (response.Status is not { } status)
+        if ((response.Status ?? capabilities?.Status) is not { } status)
         {
+            if (cameras is not null || modes is not null)
+                UpdateCameraSelections(session, resetCamera: cameras is not null, resetMode: modes is not null);
             UpdateControls();
             return;
         }
@@ -854,6 +882,11 @@ public partial class MainWindow : Window
             status.Factor > status.MaxFactor || status.DeviceName is null ||
             status.SwitchOverFactors is null || status.SwitchOverFactors.Any(f => !double.IsFinite(f)))
             throw new InvalidDataException("The camera reported invalid status.");
+        if (status.Camera is { } camera && camera.Position is not ("front" or "back") ||
+            status.VideoMode is { } videoMode && (!IsValidVideoMode(videoMode) ||
+                videoMode.FrameRate is not { } fps || !double.IsFinite(fps) || fps <= 0))
+            throw new InvalidDataException("The camera reported invalid camera or video mode status.");
+        CameraStatus? previous = session.Status;
         session.Status = status;
         DeviceTextBlock.Text = $"Device: {status.DeviceName}";
         RangeTextBlock.Text = $"Zoom range: {status.MinFactor:0.0}x - {status.MaxFactor:0.0}x";
@@ -874,7 +907,178 @@ public partial class MainWindow : Window
         {
             _updatingSlider = false;
         }
+        bool cameraChanged = previous?.Camera?.Position != status.Camera?.Position;
+        bool modeChanged = previous?.VideoMode?.Width != status.VideoMode?.Width ||
+            previous?.VideoMode?.Height != status.VideoMode?.Height ||
+            previous?.VideoMode?.FrameRate != status.VideoMode?.FrameRate;
+        UpdateCameraSelections(session, cameras is not null || cameraChanged, modes is not null || modeChanged);
         UpdateControls();
+    }
+
+    private static bool IsValidVideoMode(CameraVideoMode mode) =>
+        mode.Width > 0 && mode.Height > 0 &&
+        double.IsFinite(mode.MinFrameRate) && double.IsFinite(mode.MaxFrameRate) &&
+        mode.MinFrameRate >= 0 && mode.MaxFrameRate >= mode.MinFrameRate &&
+        mode.MaxFrameRate <= int.MaxValue;
+
+    private static double MinimumWholeFrameRate(CameraVideoMode mode) => Math.Max(1, Math.Ceiling(mode.MinFrameRate));
+
+    private void UpdateCameraSelections(CameraSession session, bool resetCamera, bool resetMode)
+    {
+        _updatingCameraControls = true;
+        try
+        {
+            if (resetCamera)
+            {
+                string? previous = (CameraComboBox.SelectedItem as CameraPositionOption)?.Position;
+                string? selected = session.Status?.Camera?.Position ?? previous;
+                CameraComboBox.ItemsSource = session.Cameras.Select(camera => camera.Position)
+                    .Distinct().OrderBy(position => position == "back" ? 0 : 1)
+                    .Select(position => new CameraPositionOption(position)).ToArray();
+                CameraComboBox.SelectedItem = CameraComboBox.Items.Cast<CameraPositionOption>()
+                    .FirstOrDefault(option => option.Position == selected);
+            }
+            if (resetMode)
+            {
+                CameraVideoMode? active = session.Status?.VideoMode;
+                ResolutionOption? previous = ResolutionComboBox.SelectedItem as ResolutionOption;
+                int? width = active?.Width ?? previous?.Width;
+                int? height = active?.Height ?? previous?.Height;
+                ResolutionComboBox.ItemsSource = session.VideoModes
+                    .Where(mode => MinimumWholeFrameRate(mode) <= Math.Floor(mode.MaxFrameRate))
+                    .Select(mode => new ResolutionOption(mode.Width, mode.Height))
+                    .Distinct().OrderBy(option => option.Width).ThenBy(option => option.Height).ToArray();
+                ResolutionComboBox.SelectedItem = ResolutionComboBox.Items.Cast<ResolutionOption>()
+                    .FirstOrDefault(option => option.Width == width && option.Height == height);
+                if (ResolutionComboBox.SelectedItem is null && ResolutionComboBox.Items.Count > 0)
+                    ResolutionComboBox.SelectedIndex = 0;
+                UpdateFrameRateSelection(session, preferActive: true);
+            }
+            CameraVideoMode? current = session.Status?.VideoMode;
+            ActiveVideoModeTextBlock.Text = current is null ? "" :
+                $"Current: {current.Width} x {current.Height} at {current.FrameRate:0.##} fps";
+        }
+        finally
+        {
+            _updatingCameraControls = false;
+        }
+    }
+
+    private void Resolution_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_updatingCameraControls || _session is not { } session)
+            return;
+        UpdateFrameRateSelection(session, preferActive: true);
+        UpdateControls();
+    }
+
+    private void Camera_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (!_updatingCameraControls && _session is not null)
+            UpdateControls();
+    }
+
+    private void UpdateFrameRateSelection(CameraSession session, bool preferActive)
+    {
+        if (ResolutionComboBox.SelectedItem is not ResolutionOption resolution)
+        {
+            FrameRateRangeTextBlock.Text = "";
+            FrameRateTextBox.Text = "";
+            return;
+        }
+        CameraVideoMode[] matching = session.VideoModes.Where(mode =>
+            mode.Width == resolution.Width && mode.Height == resolution.Height &&
+            MinimumWholeFrameRate(mode) <= Math.Floor(mode.MaxFrameRate)).ToArray();
+        FrameRateRangeTextBlock.Text = "Supported fps: " + string.Join(", ", matching
+            .Select(mode => $"{MinimumWholeFrameRate(mode):0}-{Math.Floor(mode.MaxFrameRate):0}")
+            .Distinct());
+        double? active = preferActive && session.Status?.VideoMode is { } mode &&
+            mode.Width == resolution.Width && mode.Height == resolution.Height ? mode.FrameRate : null;
+        double rounded = active is { } value ? Math.Round(value) : 0;
+        int fps = active is { } current && Math.Abs(current - rounded) < 0.001 && rounded <= int.MaxValue &&
+            matching.Any(candidate => candidate.MinFrameRate <= rounded && rounded <= candidate.MaxFrameRate)
+            ? (int)rounded : (int)MinimumWholeFrameRate(matching[0]);
+        FrameRateTextBox.Text = fps.ToString(CultureInfo.InvariantCulture);
+    }
+
+    private async void ApplyCamera_Click(object sender, RoutedEventArgs e)
+    {
+        if (_reconfiguring || _session is not { } session || !IsCurrent(session) ||
+            !session.Commands.Contains("setCamera") ||
+            CameraComboBox.SelectedItem is not CameraPositionOption selected)
+            return;
+        if (selected.Position == session.Status?.Camera?.Position)
+            return;
+        await ReconfigureAsync(session, "setCamera", new { position = selected.Position }, refreshModes: true);
+    }
+
+    private async void ApplyVideoMode_Click(object sender, RoutedEventArgs e)
+    {
+        if (_reconfiguring || _session is not { } session || !IsCurrent(session) ||
+            !session.Commands.Contains("setVideoMode") ||
+            ResolutionComboBox.SelectedItem is not ResolutionOption selected)
+            return;
+        if (!int.TryParse(FrameRateTextBox.Text, NumberStyles.None, CultureInfo.InvariantCulture, out int fps) ||
+            fps <= 0 || !session.VideoModes.Any(mode => mode.Width == selected.Width &&
+                mode.Height == selected.Height && mode.MinFrameRate <= fps && fps <= mode.MaxFrameRate))
+        {
+            ErrorTextBlock.Text = "Enter a whole-number frame rate within a supported range for the selected resolution.";
+            return;
+        }
+        if (session.Status?.VideoMode is { } active && active.Width == selected.Width &&
+            active.Height == selected.Height && active.FrameRate == fps)
+            return;
+        await ReconfigureAsync(session, "setVideoMode", new { width = selected.Width, height = selected.Height, fps },
+            refreshModes: false);
+    }
+
+    private async Task ReconfigureAsync(CameraSession session, string command, object parameters, bool refreshModes)
+    {
+        _reconfiguring = true;
+        ErrorTextBlock.Text = "";
+        CancelSlider();
+        ++session.Revision;
+        UpdateControls();
+        try
+        {
+            await StopContinuousZoomAsync();
+            if (!IsCurrent(session))
+                return;
+            if (refreshModes)
+            {
+                session.VideoModes = [];
+                UpdateCameraSelections(session, resetCamera: false, resetMode: true);
+            }
+            CameraResponse? response = await RunCommandAsync(session, command, parameters,
+                revision: session.Revision, timeout: TimeSpan.FromSeconds(15));
+            if (!IsCurrent(session))
+                return;
+            string error = ErrorTextBlock.Text;
+            if (response?.Status is null)
+            {
+                if (response is not null)
+                    error = "The camera did not report its updated status.";
+                await RunCommandAsync(session, "status", revision: session.Revision);
+                if (IsCurrent(session) && refreshModes)
+                    UpdateCameraSelections(session, resetCamera: true, resetMode: false);
+            }
+            if (refreshModes)
+            {
+                bool getModes = session.Commands.Contains("getVideoModes");
+                CameraResponse? refreshed = await RunCommandAsync(session, getModes ? "getVideoModes" : "capabilities");
+                if (refreshed is not null &&
+                    (getModes ? refreshed.VideoModes : refreshed.Capabilities?.VideoModes) is null)
+                    ErrorTextBlock.Text = "The camera did not report video modes after the camera change.";
+            }
+            if (!string.IsNullOrEmpty(error))
+                ErrorTextBlock.Text = error;
+        }
+        finally
+        {
+            _reconfiguring = false;
+            if (IsCurrent(session))
+                UpdateControls();
+        }
     }
 
     private async void Refresh_Click(object sender, RoutedEventArgs e)
@@ -930,7 +1134,7 @@ public partial class MainWindow : Window
     }
 
     private bool CanSetZoom(CameraSession session) =>
-        IsCurrent(session) && session.Status is not null && session.Commands.Contains("setZoom");
+        !_reconfiguring && IsCurrent(session) && session.Status is not null && session.Commands.Contains("setZoom");
 
     private bool CanRampZoom(CameraSession session) =>
         CanSetZoom(session) && session.Commands.Contains("rampZoom") && session.Commands.Contains("stopZoom");
@@ -1175,6 +1379,14 @@ public partial class MainWindow : Window
         SwitchOverTextBlock.Text = "";
         RampingTextBlock.Text = "";
         ZoomTextBlock.Text = "Current zoom: not reported";
+        _updatingCameraControls = true;
+        CameraComboBox.ItemsSource = null;
+        ResolutionComboBox.ItemsSource = null;
+        _updatingCameraControls = false;
+        FrameRateRangeTextBlock.Text = "";
+        FrameRateTextBox.Text = "";
+        ActiveVideoModeTextBlock.Text = "";
+        CameraControlsInfoTextBlock.Text = "";
         if (!_client.IsConnected)
             _ = SetPlaybackStateAsync(PlaybackState.Disconnected);
     }
@@ -1188,8 +1400,8 @@ public partial class MainWindow : Window
         PortTextBox.IsEnabled = !_busy && !connected && !_closing;
         bool available = !_busy && !_closing && _session is { } session && IsCurrent(session);
         RefreshButton.IsEnabled = available;
-        bool canSet = available && CanSetZoom(_session!);
-        bool canRamp = available && CanRampZoom(_session!);
+        bool canSet = available && !_reconfiguring && CanSetZoom(_session!);
+        bool canRamp = available && !_reconfiguring && CanRampZoom(_session!);
         ZoomSlider.IsEnabled = canSet;
         SpeedSlider.IsEnabled = canRamp;
         ZoomInButton.IsEnabled = canRamp;
@@ -1197,8 +1409,19 @@ public partial class MainWindow : Window
         bool canStream = available && _session!.Commands.Contains("startStream") && _session.Commands.Contains("stopStream");
         PlaybackButton.IsEnabled = canStream;
         PlaybackButton.Content = _playbackRequested ? "Stop video" : "Start video";
-        CapturePhotoButton.IsEnabled = available && !_capturingPhoto && _session!.Commands.Contains("capturePhoto");
+        CapturePhotoButton.IsEnabled = available && !_reconfiguring && !_capturingPhoto && _session!.Commands.Contains("capturePhoto");
         CapturePhotoButton.Content = _capturingPhoto ? "Capturing..." : "Capture photo";
+        bool canChangeCamera = available && !_reconfiguring && _session!.Commands.Contains("setCamera") &&
+            _session.Status?.Camera is not null && _session.Cameras.Length > 0;
+        bool canChangeMode = available && !_reconfiguring && _session!.Commands.Contains("setVideoMode") &&
+            _session.VideoModes.Length > 0 && _session.Status?.VideoMode is not null;
+        CameraComboBox.IsEnabled = canChangeCamera;
+        ApplyCameraButton.IsEnabled = canChangeCamera && CameraComboBox.SelectedItem is not null;
+        ResolutionComboBox.IsEnabled = canChangeMode && ResolutionComboBox.Items.Count > 0;
+        FrameRateTextBox.IsEnabled = ResolutionComboBox.IsEnabled;
+        ApplyVideoModeButton.IsEnabled = ResolutionComboBox.IsEnabled && ResolutionComboBox.SelectedItem is not null;
+        CameraControlsInfoTextBlock.Text = available && !canChangeCamera && !canChangeMode && !_reconfiguring
+            ? "Camera and video mode controls are unavailable for this server." : "";
         ShowLiveButton.IsEnabled = _capturedPhoto is not null;
         SavePhotoButton.IsEnabled = _capturedPhoto is not null;
         StatusTextBlock.Text = _connecting ? "Connecting..." : connected ? "Connected" :
@@ -1270,7 +1493,19 @@ public partial class MainWindow : Window
         public HashSet<string> Commands { get; set; } = new(StringComparer.Ordinal);
         public CameraStatus? Status { get; set; }
         public CameraStreamStatus? StreamStatus { get; set; }
+        public CameraDescriptor[] Cameras { get; set; } = [];
+        public CameraVideoMode[] VideoModes { get; set; } = [];
         public long Revision { get; set; }
+    }
+
+    private sealed record CameraPositionOption(string Position)
+    {
+        public override string ToString() => Position == "front" ? "Front camera" : "Rear camera";
+    }
+
+    private sealed record ResolutionOption(int Width, int Height)
+    {
+        public override string ToString() => $"{Width} x {Height}";
     }
 
     private sealed class ZoomPress(CameraSession session, Button button, TouchDevice? touch, Task previousStop)

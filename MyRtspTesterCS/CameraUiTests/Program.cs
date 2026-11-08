@@ -24,6 +24,9 @@ internal static class Program
             try
             {
                 await Run("connection, gating and status", ConnectionAndGating);
+                await Run("camera and video mode controls", CameraAndVideoModeControls);
+                await Run("camera capability gating and explicit playback stop", CameraControlsAndPlaybackStop);
+                await Run("camera change disconnect cancellation", CameraChangeDisconnect);
                 await Run("photo command gating and BGRA display", PhotoCommandAndBgraDisplay);
                 await Run("BGRA frame render buffer layout", FrameRenderBufferLayout);
                 await Run("background camera response dispatch", BackgroundCameraResponseDispatch);
@@ -51,6 +54,7 @@ internal static class Program
         await using var camera = new FakeCamera("status", "setZoom", "capturePhoto");
         await using var ui = new Ui();
         Check(!ui.Slider.IsEnabled && !ui.In.IsEnabled && !ui.Refresh.IsEnabled, "controls initially disabled");
+        Check(!ui.Camera.IsEnabled && !ui.Resolution.IsEnabled, "camera controls initially disabled");
         ui.Host.Text = " ";
         Click(ui.Connection);
         Check(ui.Status.Text == "Connection failed" && ui.Error.Text.Contains("Enter an IP address"),
@@ -67,6 +71,7 @@ internal static class Program
             "partial capabilities gate controls");
         Check(ui.CapturePhoto.IsEnabled, "photo capture is enabled only when advertised");
         Check(ui.Refresh.IsEnabled && ui.Device.Text == "Device: Fake camera", "status and refresh");
+        Check(!ui.Camera.IsEnabled && !ui.Resolution.IsEnabled, "legacy server cannot enable unsupported camera controls");
         Check(ui.Range.Text == "Zoom range: 1.0x - 8.0x" && ui.Switch.Text.Contains("2.0x") &&
             ui.Ramping.Text == "Ramping: No" && ui.Zoom.Text == "Current zoom: 2.00x", "status fields");
         Check(ui.Slider.Minimum == 1 && ui.Slider.Maximum == 8 && ui.Slider.Value == 2, "slider range");
@@ -94,6 +99,101 @@ internal static class Program
         await ui.Connect(camera);
         Check(!ui.Slider.IsEnabled && !ui.In.IsEnabled, "ramp requires setZoom capability");
         Check(!ui.CapturePhoto.IsEnabled, "photo capture is disabled when not advertised");
+    }
+
+    private static async Task CameraAndVideoModeControls()
+    {
+        await using var camera = new FakeCamera("status", "setZoom", "setCamera", "getVideoModes", "setVideoMode");
+        await using var ui = new Ui();
+        await ui.Connect(camera);
+        await Until(() => ui.Camera.IsEnabled && ui.Resolution.IsEnabled, "camera and video controls enabled");
+        Check(ui.Camera.Items.Count == 2 && ui.Camera.SelectedItem?.ToString() == "Rear camera",
+            "current camera and advertised positions displayed");
+        Check(ui.Resolution.SelectedItem?.ToString() == "1280 x 720" &&
+              ui.FrameRate.Text == "30" && ui.FrameRateRange.Text.Contains("30-60"),
+            "active mode and integral fps range displayed");
+        Check(camera.Count("setCamera") == 0 && camera.Count("setVideoMode") == 0,
+            "initial selection does not send changes");
+
+        ui.FrameRate.Text = "29";
+        Click(ui.ApplyVideoMode);
+        Check(ui.Error.Text.Contains("whole-number") && camera.Count("setVideoMode") == 0,
+            "fps below fractional minimum rejected");
+        ui.Resolution.SelectedIndex = 0;
+        Check(ui.FrameRateRange.Text.Contains("1-30"), "zero lower bound is clamped to a positive integral fps");
+        ui.FrameRate.Text = "25";
+        var delayedMode = camera.DelayNext("setVideoMode");
+        Click(ui.ApplyVideoMode);
+        await delayedMode.Received.Task.WaitAsync(Timeout);
+        Check(!ui.Camera.IsEnabled && !ui.Resolution.IsEnabled, "changes disabled while a command is pending");
+        Click(ui.ApplyVideoMode);
+        delayedMode.Open();
+        await Until(() => ui.Resolution.IsEnabled && ui.ActiveMode.Text.Contains("640 x 480 at 25"),
+            "updated mode displayed");
+        JsonElement mode = camera.Requests.Last(r => Command(r) == "setVideoMode");
+        Check(camera.Count("setVideoMode") == 1 && mode.GetProperty("width").GetInt32() == 640 &&
+              mode.GetProperty("height").GetInt32() == 480 && mode.GetProperty("fps").GetInt32() == 25,
+            "mode command has exact selected dimensions and fps");
+
+        typeof(MainWindow).GetField("_playbackRequested", PrivateInstance)!.SetValue(ui.Window, true);
+        ui.Camera.SelectedIndex = 1;
+        Click(ui.ApplyCamera);
+        await Until(() => camera.Count("getVideoModes") == 1 && ui.Resolution.IsEnabled &&
+                          ui.ActiveMode.Text.Contains("1920 x 1080 at 30"), "camera switch refresh");
+        JsonElement change = camera.Requests.Last(r => Command(r) == "setCamera");
+        Check(change.GetProperty("position").GetString() == "front", "front position sent");
+        Check(ui.Resolution.Items.Count == 1 && ui.Resolution.SelectedItem?.ToString() == "1920 x 1080",
+            "front camera modes and fallback active mode replace rear modes");
+        Check((bool)typeof(MainWindow).GetField("_playbackRequested", PrivateInstance)!.GetValue(ui.Window)! &&
+              camera.Count("stopStream") == 0 && camera.Count("startStream") == 0,
+            "reconfiguration preserves playback intent without changing shared stream state");
+        typeof(MainWindow).GetField("_playbackRequested", PrivateInstance)!.SetValue(ui.Window, false);
+
+        camera.RejectNext("setCamera");
+        ui.Camera.SelectedIndex = 0;
+        Click(ui.ApplyCamera);
+        await Until(() => camera.Count("getVideoModes") == 2 && ui.Camera.IsEnabled &&
+                          ui.Error.Text.Contains("Camera change failed"), "failed change refresh and error");
+        Check(ui.Resolution.SelectedItem?.ToString() == "1920 x 1080" &&
+              ui.Camera.SelectedItem?.ToString() == "Front camera",
+            "failed camera change restores actual camera and modes");
+    }
+
+    private static async Task CameraChangeDisconnect()
+    {
+        await using var camera = new FakeCamera("status", "setCamera", "getVideoModes", "setVideoMode");
+        await using var ui = new Ui();
+        await ui.Connect(camera);
+        await Until(() => ui.Camera.IsEnabled, "camera controls initialized");
+        var delayed = camera.DelayNext("setCamera");
+        ui.Camera.SelectedIndex = 1;
+        Click(ui.ApplyCamera);
+        await delayed.Received.Task.WaitAsync(Timeout);
+        await ui.Disconnect();
+        delayed.Open();
+        await Task.Delay(100);
+        Check(!ui.Camera.IsEnabled && camera.Count("getVideoModes") == 0,
+            "disconnect cancels in-flight change without refreshing old session");
+    }
+
+    private static async Task CameraControlsAndPlaybackStop()
+    {
+        await using var camera = new FakeCamera("status", "setCamera", "getVideoModes");
+        await using var ui = new Ui();
+        await ui.Connect(camera);
+        await Until(() => ui.Camera.IsEnabled, "camera controls initialized");
+        Check(!ui.Resolution.IsEnabled, "video mode selection requires advertised setVideoMode");
+        typeof(MainWindow).GetField("_playbackRequested", PrivateInstance)!.SetValue(ui.Window, true);
+        Invoke(ui.Window, "UpdateControls");
+        var delayed = camera.DelayNext("setCamera");
+        ui.Camera.SelectedIndex = 1;
+        Click(ui.ApplyCamera);
+        await delayed.Received.Task.WaitAsync(Timeout);
+        Click(ui.Playback);
+        delayed.Open();
+        await Until(() => camera.Count("stopStream") == 1 && ui.Camera.IsEnabled, "explicit stop after reconfiguration");
+        Check(!(bool)typeof(MainWindow).GetField("_playbackRequested", PrivateInstance)!.GetValue(ui.Window)! &&
+              camera.Count("startStream") == 0, "explicit stop is not undone by camera reconfiguration");
     }
 
     private static async Task PhotoCommandAndBgraDisplay()
@@ -320,7 +420,15 @@ internal static class Program
         public Button Refresh => Find<Button>("RefreshButton");
         public Button Connection => Find<Button>("ConnectionButton");
         public Button CapturePhoto => Find<Button>("CapturePhotoButton");
+        public Button Playback => Find<Button>("PlaybackButton");
         public ComboBox PhotoFormat => Find<ComboBox>("PhotoFormatComboBox");
+        public ComboBox Camera => Find<ComboBox>("CameraComboBox");
+        public ComboBox Resolution => Find<ComboBox>("ResolutionComboBox");
+        public TextBox FrameRate => Find<TextBox>("FrameRateTextBox");
+        public TextBlock FrameRateRange => Find<TextBlock>("FrameRateRangeTextBlock");
+        public TextBlock ActiveMode => Find<TextBlock>("ActiveVideoModeTextBlock");
+        public Button ApplyCamera => Find<Button>("ApplyCameraButton");
+        public Button ApplyVideoMode => Find<Button>("ApplyVideoModeButton");
         public TextBox Host => Find<TextBox>("HostTextBox");
         public TextBlock Error => Find<TextBlock>("ErrorTextBlock");
         public TextBlock Status => Find<TextBlock>("StatusTextBlock");

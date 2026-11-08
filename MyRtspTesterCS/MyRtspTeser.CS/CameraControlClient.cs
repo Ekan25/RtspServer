@@ -115,15 +115,20 @@ public sealed class CameraControlClient : IAsyncDisposable
         CancellationToken cancellationToken)
         => SendCommandCoreAsync(command, parameters, written, cancellationToken);
 
+    internal Task<CameraResponse> SendCommandWithTimeoutAsync(
+        string command, object? parameters, TimeSpan timeout, CancellationToken cancellationToken)
+        => SendCommandCoreAsync(command, parameters, null, cancellationToken, timeout);
+
     private async Task<CameraResponse> SendCommandCoreAsync(
         string command,
         object? parameters,
         TaskCompletionSource<bool>? written,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        TimeSpan? timeout = null)
     {
         try
         {
-            return await SendCommandInternalAsync(command, parameters, written, cancellationToken)
+            return await SendCommandInternalAsync(command, parameters, written, cancellationToken, timeout)
                 .ConfigureAwait(false);
         }
         finally
@@ -136,7 +141,8 @@ public sealed class CameraControlClient : IAsyncDisposable
         string command,
         object? parameters,
         TaskCompletionSource<bool>? written,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        TimeSpan? commandTimeout)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(command);
 
@@ -201,7 +207,7 @@ public sealed class CameraControlClient : IAsyncDisposable
                 throw new InvalidOperationException("Duplicate request ID.");
         }
 
-        using var timeout = new CancellationTokenSource(CommandTimeout);
+        using var timeout = new CancellationTokenSource(commandTimeout ?? CommandTimeout);
         using var requestCancellation = CancellationTokenSource.CreateLinkedTokenSource(
             cancellationToken, timeout.Token);
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(

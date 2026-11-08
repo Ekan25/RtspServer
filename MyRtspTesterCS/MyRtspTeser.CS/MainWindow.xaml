@@ -141,15 +141,31 @@
                         </StackPanel>
                     </GroupBox>
 
+                    <GroupBox Header="Camera and Video Mode" Padding="10" Margin="0,10,0,0">
+                        <StackPanel>
+                            <TextBlock Text="Camera"/>
+                            <ComboBox x:Name="CameraComboBox" IsEnabled="False" Margin="0,4,0,0"
+                                      SelectionChanged="Camera_SelectionChanged"/>
+                            <Button x:Name="ApplyCameraButton" Content="Change camera" IsEnabled="False"
+                                    Margin="0,6,0,0" Click="ApplyCamera_Click"/>
+                            <TextBlock Text="Resolution" Margin="0,10,0,0"/>
+                            <ComboBox x:Name="ResolutionComboBox" IsEnabled="False" Margin="0,4,0,0"
+                                      SelectionChanged="Resolution_SelectionChanged"/>
+                            <TextBlock x:Name="FrameRateRangeTextBlock" Margin="0,4,0,0" TextWrapping="Wrap"/>
+                            <TextBlock Text="Frame rate (fps)" Margin="0,6,0,0"/>
+                            <TextBox x:Name="FrameRateTextBox" IsEnabled="False" Margin="0,4,0,0"/>
+                            <Button x:Name="ApplyVideoModeButton" Content="Apply video mode" IsEnabled="False"
+                                    Margin="0,6,0,0" Click="ApplyVideoMode_Click"/>
+                            <TextBlock x:Name="ActiveVideoModeTextBlock" Margin="0,6,0,0" TextWrapping="Wrap"/>
+                            <TextBlock x:Name="CameraControlsInfoTextBlock" Margin="0,6,0,0" TextWrapping="Wrap"/>
+                        </StackPanel>
+                    </GroupBox>
+
                     <GroupBox Header="Additional Camera Controls" Padding="10" Margin="0,10,0,0">
                         <StackPanel>
-                            <ComboBox IsEnabled="False" SelectedIndex="0">
-                                <ComboBoxItem Content="Rear camera"/>
-                                <ComboBoxItem Content="Front camera"/>
-                            </ComboBox>
                             <CheckBox Content="Torch" IsEnabled="False" Margin="0,6,0,0"/>
                             <CheckBox Content="Autofocus" IsEnabled="False" IsChecked="True" Margin="0,6,0,0"/>
-                            <TextBlock Text="Front/rear camera, torch, and autofocus are unavailable because this server does not advertise those controls."
+                            <TextBlock Text="Torch and autofocus controls are not available in this client."
                                        Margin="0,6,0,0" TextWrapping="Wrap"/>
                         </StackPanel>
                     </GroupBox>

@@ -4,6 +4,17 @@
 
 Control remains newline-delimited UTF-8 JSON on TCP port 8555. Existing clients remain compatible.
 
+### Camera and video mode
+
+`capabilities` returns a `capabilities` object containing supported `commands`, camera descriptors in `cameras`, video mode ranges for the active camera in `videoModes`, and the current `status`. Camera descriptors report `position` as `back` or `front`; status reports `camera` and `videoMode`. `getVideoModes` returns the active camera's ranges in a top-level `videoModes` array. Each range contains `width`, `height`, `minFrameRate`, and `maxFrameRate`.
+
+```json
+{"id":"camera-1","command":"setCamera","position":"front"}
+{"id":"mode-1","command":"setVideoMode","width":1280,"height":720,"fps":30}
+```
+
+Video mode requests require a positive whole-number `fps` within an advertised range for the selected dimensions. A camera switch may select a fallback mode if the previous mode is unavailable; clients should read the returned status and refresh the active camera's modes. Both commands disconnect existing RTSP viewers for reconfiguration, including viewers other than the requesting client. A viewer that was playing should reconnect without stopping the shared stream. Errors use the existing error envelope; a failure can occur after viewers have already been disconnected.
+
 ### `capturePhoto`
 
 ```json

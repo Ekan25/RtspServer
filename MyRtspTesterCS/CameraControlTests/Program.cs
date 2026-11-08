@@ -120,6 +120,20 @@ internal static class Program
         Check(stream.Status is null && streamStatus is { State: "running", IsReady: true, IsStreaming: true },
             "Stream-only response should infer running readiness.");
         Check(streamStatus.Message is null, "Stream message is optional.");
+        const string cameraJson = """
+            {"id":"camera","ok":true,"capabilities":{"commands":["setCamera","setVideoMode"],
+            "cameras":[{"position":"front","name":"Front"}],
+            "videoModes":[{"width":1280,"height":720,"minFrameRate":29.97,"maxFrameRate":60}],
+            "status":{"camera":{"position":"front","name":"Front"},
+            "videoMode":{"width":1280,"height":720,"minFrameRate":30,"maxFrameRate":30,"frameRate":30},
+            "factor":1,"minFactor":1,"maxFactor":8,"isRamping":false,"deviceName":"Front","switchOverFactors":[]}}}
+            """;
+        CameraCapabilities camera = JsonSerializer.Deserialize<CameraResponse>(cameraJson)?.Capabilities
+            ?? throw new Exception("Nested camera capabilities missing.");
+        Check(camera.Cameras?.Single().Position == "front" &&
+              camera.VideoModes?.Single() is { Width: 1280, Height: 720, MinFrameRate: 29.97, MaxFrameRate: 60 } &&
+              camera.Status?.VideoMode?.FrameRate == 30 && camera.Status.Camera?.Position == "front",
+            "Nested camera and video mode fields must be parsed.");
         return Task.CompletedTask;
     }
 

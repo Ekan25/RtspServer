@@ -27,6 +27,15 @@ public sealed class CameraResponse
     [JsonPropertyName("status")]
     public CameraStatus? Status { get; init; }
 
+    [JsonPropertyName("capabilities")]
+    public CameraCapabilities? Capabilities { get; init; }
+
+    [JsonPropertyName("videoModes")]
+    public CameraVideoMode[]? VideoModes { get; init; }
+
+    [JsonPropertyName("cameras")]
+    public CameraDescriptor[]? Cameras { get; init; }
+
     [JsonPropertyName("streamStatus")]
     public CameraStreamStatus? StreamStatus { get; init; }
 
@@ -95,6 +104,12 @@ public sealed class CameraStreamStatus
 
 public sealed class CameraStatus
 {
+    [JsonPropertyName("camera")]
+    public CameraDescriptor? Camera { get; init; }
+
+    [JsonPropertyName("videoMode")]
+    public CameraVideoMode? VideoMode { get; init; }
+
     [JsonPropertyName("factor")]
     [JsonRequired]
     public double Factor { get; init; }
@@ -118,6 +133,53 @@ public sealed class CameraStatus
     [JsonPropertyName("switchOverFactors")]
     [JsonRequired]
     public double[] SwitchOverFactors { get; init; } = Array.Empty<double>();
+}
+
+public sealed class CameraCapabilities
+{
+    [JsonPropertyName("commands")]
+    public string[]? Commands { get; init; }
+
+    [JsonPropertyName("status")]
+    public CameraStatus? Status { get; init; }
+
+    [JsonPropertyName("cameras")]
+    public CameraDescriptor[]? Cameras { get; init; }
+
+    [JsonPropertyName("videoModes")]
+    public CameraVideoMode[]? VideoModes { get; init; }
+}
+
+public sealed class CameraDescriptor
+{
+    [JsonPropertyName("position")]
+    [JsonRequired]
+    public string Position { get; init; } = "";
+
+    [JsonPropertyName("name")]
+    public string? Name { get; init; }
+}
+
+public sealed class CameraVideoMode
+{
+    [JsonPropertyName("width")]
+    [JsonRequired]
+    public int Width { get; init; }
+
+    [JsonPropertyName("height")]
+    [JsonRequired]
+    public int Height { get; init; }
+
+    [JsonPropertyName("minFrameRate")]
+    [JsonRequired]
+    public double MinFrameRate { get; init; }
+
+    [JsonPropertyName("maxFrameRate")]
+    [JsonRequired]
+    public double MaxFrameRate { get; init; }
+
+    [JsonPropertyName("frameRate")]
+    public double? FrameRate { get; init; }
 }
 
 public sealed class CameraError
