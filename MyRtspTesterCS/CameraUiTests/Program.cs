@@ -5,6 +5,7 @@ using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using CameraController;
 
@@ -23,6 +24,7 @@ internal static class Program
             try
             {
                 await Run("connection, gating and status", ConnectionAndGating);
+                await Run("photo command gating and BGRA display", PhotoCommandAndBgraDisplay);
                 await Run("BGRA frame render buffer layout", FrameRenderBufferLayout);
                 await Run("background camera response dispatch", BackgroundCameraResponseDispatch);
                 await Run("debounce and stale status", SliderAndStaleStatus);
@@ -46,7 +48,7 @@ internal static class Program
 
     private static async Task ConnectionAndGating()
     {
-        await using var camera = new FakeCamera("status", "setZoom");
+        await using var camera = new FakeCamera("status", "setZoom", "capturePhoto");
         await using var ui = new Ui();
         Check(!ui.Slider.IsEnabled && !ui.In.IsEnabled && !ui.Refresh.IsEnabled, "controls initially disabled");
         ui.Host.Text = " ";
@@ -63,6 +65,7 @@ internal static class Program
         Check(string.IsNullOrEmpty(ui.Error.Text), "status-free capabilities and stream responses are accepted");
         Check(ui.Slider.IsEnabled && !ui.In.IsEnabled && !ui.Out.IsEnabled && !ui.Speed.IsEnabled,
             "partial capabilities gate controls");
+        Check(ui.CapturePhoto.IsEnabled, "photo capture is enabled only when advertised");
         Check(ui.Refresh.IsEnabled && ui.Device.Text == "Device: Fake camera", "status and refresh");
         Check(ui.Range.Text == "Zoom range: 1.0x - 8.0x" && ui.Switch.Text.Contains("2.0x") &&
             ui.Ramping.Text == "Ramping: No" && ui.Zoom.Text == "Current zoom: 2.00x", "status fields");
@@ -90,6 +93,25 @@ internal static class Program
         await ui.Disconnect();
         await ui.Connect(camera);
         Check(!ui.Slider.IsEnabled && !ui.In.IsEnabled, "ramp requires setZoom capability");
+        Check(!ui.CapturePhoto.IsEnabled, "photo capture is disabled when not advertised");
+    }
+
+    private static async Task PhotoCommandAndBgraDisplay()
+    {
+        var photo = new ReceivedPhoto("bgra", 2, 1, 8, [255, 0, 0, 255, 0, 255, 0, 255]);
+        BitmapSource bitmap = (BitmapSource)typeof(MainWindow)
+            .GetMethod("DecodePhoto", BindingFlags.Static | BindingFlags.NonPublic)!
+            .Invoke(null, [photo])!;
+        byte[] png = (byte[])typeof(MainWindow)
+            .GetMethod("EncodePng", BindingFlags.Static | BindingFlags.NonPublic)!
+            .Invoke(null, [bitmap])!;
+        Check(bitmap.PixelWidth == 2 && bitmap.PixelHeight == 1, "BGRA photo dimensions are preserved");
+        Check(png.Length > 8 && png.Take(8).SequenceEqual(new byte[] { 137, 80, 78, 71, 13, 10, 26, 10 }),
+            "BGRA photos are encoded as PNG for saving");
+
+        await using var ui = new Ui();
+        Check(ui.PhotoFormat.SelectedIndex == 0 && ((ComboBoxItem)ui.PhotoFormat.SelectedItem).Tag?.ToString() == "jpeg",
+            "JPEG is the default capture format");
     }
 
     private static async Task SliderAndStaleStatus()
@@ -297,6 +319,8 @@ internal static class Program
         public Button Out => Find<Button>("ZoomOutButton");
         public Button Refresh => Find<Button>("RefreshButton");
         public Button Connection => Find<Button>("ConnectionButton");
+        public Button CapturePhoto => Find<Button>("CapturePhotoButton");
+        public ComboBox PhotoFormat => Find<ComboBox>("PhotoFormatComboBox");
         public TextBox Host => Find<TextBox>("HostTextBox");
         public TextBlock Error => Find<TextBlock>("ErrorTextBlock");
         public TextBlock Status => Find<TextBlock>("StatusTextBlock");

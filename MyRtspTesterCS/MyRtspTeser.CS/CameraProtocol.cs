@@ -39,11 +39,37 @@ public sealed class CameraResponse
     [JsonPropertyName("event")]
     public string? Event { get; init; }
 
+    [JsonPropertyName("photo")]
+    public PhotoTransferInfo? Photo { get; init; }
+
     [JsonPropertyName("error")]
     public CameraError? Error { get; init; }
 
     [JsonExtensionData]
     public Dictionary<string, JsonElement> Properties { get; init; } = new();
+}
+
+public sealed class PhotoTransferInfo
+{
+    [JsonPropertyName("transferId")]
+    [JsonRequired]
+    public string TransferId { get; init; } = "";
+
+    [JsonPropertyName("transferHost")]
+    [JsonRequired]
+    public string TransferHost { get; init; } = "";
+
+    [JsonPropertyName("transferPort")]
+    [JsonRequired]
+    public ushort TransferPort { get; init; }
+
+    [JsonPropertyName("transferToken")]
+    [JsonRequired]
+    public string TransferToken { get; init; } = "";
+
+    [JsonPropertyName("format")]
+    [JsonRequired]
+    public string Format { get; init; } = "";
 }
 
 public sealed class CameraStreamStatus

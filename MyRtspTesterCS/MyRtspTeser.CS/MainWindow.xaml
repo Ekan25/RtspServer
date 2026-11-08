@@ -1,121 +1,159 @@
 <Window x:Class="CameraController.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="iPhone Camera Control" Height="650" Width="560"
-        MinHeight="560" MinWidth="440" Deactivated="Window_Deactivated" Loaded="Window_Loaded">
-    <ScrollViewer VerticalScrollBarVisibility="Auto">
-        <StackPanel Margin="20">
-            <GroupBox Header="Connection" Padding="10">
-                <StackPanel>
-                    <Grid>
-                        <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="*"/>
-                            <ColumnDefinition Width="90"/>
-                        </Grid.ColumnDefinitions>
-                        <StackPanel Margin="0,0,10,0">
-                            <TextBlock Text="Address"/>
-                            <TextBox x:Name="HostTextBox" Margin="0,4,0,0" Height="28"/>
-                        </StackPanel>
-                        <StackPanel Grid.Column="1">
-                            <TextBlock Text="Port"/>
-                            <TextBox x:Name="PortTextBox" Text="8555" Margin="0,4,0,0" Height="28"/>
-                        </StackPanel>
-                    </Grid>
-                    <DockPanel Margin="0,10,0,0">
-                        <Button x:Name="ConnectionButton" DockPanel.Dock="Right" Content="Connect"
-                                Padding="12,4" Click="ConnectionButton_Click"/>
-                        <TextBlock x:Name="StatusTextBlock" Text="Disconnected" VerticalAlignment="Center"/>
-                    </DockPanel>
-                    <WrapPanel Margin="0,8,0,0">
-                        <CheckBox x:Name="AutoConnectCheckBox" Content="Auto Connect" Margin="0,0,16,0"
-                                  Checked="AutoConnect_Changed" Unchecked="AutoConnect_Changed"/>
-                        <CheckBox x:Name="AutoStreamCheckBox" Content="Auto Stream"
-                                  Checked="AutoStream_Changed" Unchecked="AutoStream_Changed"/>
-                    </WrapPanel>
-                </StackPanel>
+        Title="iPhone Camera Control" Height="780" Width="1280"
+            MinHeight="600" MinWidth="900" Deactivated="Window_Deactivated" Loaded="Window_Loaded">
+        <Grid Margin="16">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="*"/>
+            </Grid.RowDefinitions>
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="3*" MinWidth="420"/>
+                <ColumnDefinition Width="1*" MinWidth="140"/>
+            </Grid.ColumnDefinitions>
+
+            <GroupBox Grid.Row="0" Grid.ColumnSpan="2" Header="Connection" Padding="10">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="90"/>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <StackPanel Margin="0,0,10,0">
+                        <TextBlock Text="Address"/>
+                        <TextBox x:Name="HostTextBox" Margin="0,4,0,0" Height="28"/>
+                    </StackPanel>
+                    <StackPanel Grid.Column="1" Margin="0,0,10,0">
+                        <TextBlock Text="Control port"/>
+                        <TextBox x:Name="PortTextBox" Text="8555" Margin="0,4,0,0" Height="28"/>
+                    </StackPanel>
+                    <Button x:Name="ConnectionButton" Grid.Column="2" Content="Connect" Padding="12,4"
+                            Margin="0,18,14,0" VerticalAlignment="Top" Click="ConnectionButton_Click"/>
+                    <CheckBox x:Name="AutoConnectCheckBox" Grid.Column="3" Content="Auto Connect"
+                              Margin="0,24,14,0" Checked="AutoConnect_Changed" Unchecked="AutoConnect_Changed"/>
+                    <CheckBox x:Name="AutoStreamCheckBox" Grid.Column="4" Content="Auto Stream"
+                              Margin="0,24,4,0" Checked="AutoStream_Changed" Unchecked="AutoStream_Changed"/>
+                    <TextBlock x:Name="StatusTextBlock" Grid.ColumnSpan="5" Margin="0,48,0,0"
+                               Text="Disconnected" VerticalAlignment="Center"/>
+                </Grid>
             </GroupBox>
 
-            <TextBlock x:Name="ErrorTextBlock" Foreground="Firebrick" Margin="0,8,0,0" TextWrapping="Wrap"/>
+            <TextBlock x:Name="ErrorTextBlock" Grid.Row="1" Grid.ColumnSpan="2" Foreground="Firebrick"
+                       Margin="2,8,2,4" TextWrapping="Wrap"/>
 
-            <GroupBox Header="RTSP Video" Padding="8" Margin="0,12,0,0">
-                <StackPanel>
-                    <Border Background="Black" Height="300" ClipToBounds="True">
+            <GroupBox Grid.Row="2" Grid.Column="0" Header="Video and Photo" Padding="8" Margin="0,4,12,0">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="*"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+                    <Border Background="Black" MinHeight="320" ClipToBounds="True">
                         <Grid>
                             <Image x:Name="VideoImage" Stretch="Uniform"/>
-                            <TextBlock x:Name="VideoStateTextBlock" Text="Disconnected"
-                                       Foreground="White" HorizontalAlignment="Center"
-                                       VerticalAlignment="Center"/>
+                            <Image x:Name="PhotoImage" Stretch="Uniform" Visibility="Collapsed"/>
+                            <TextBlock x:Name="VideoStateTextBlock" Text="Disconnected" Foreground="White"
+                                       HorizontalAlignment="Center" VerticalAlignment="Center"/>
                         </Grid>
                     </Border>
-                    <DockPanel Margin="0,8,0,0">
+                    <DockPanel Grid.Row="1" Margin="0,8,0,0">
                         <StackPanel Orientation="Horizontal" DockPanel.Dock="Right">
                             <TextBlock Text="Latency ms" VerticalAlignment="Center" Margin="0,0,6,0"/>
-                            <TextBox x:Name="LatencyTextBox" Text="20" Width="52" Height="26"
+                            <TextBox x:Name="LatencyTextBox" Text="20" Width="58" Height="26"
                                      VerticalContentAlignment="Center"/>
                         </StackPanel>
                         <Button x:Name="PlaybackButton" Content="Start video" Padding="12,4"
                                 IsEnabled="False" Click="PlaybackButton_Click"/>
                     </DockPanel>
-                    <TextBlock x:Name="VideoInfoTextBlock" Margin="0,5,0,0" Foreground="Gray"/>
-                </StackPanel>
-            </GroupBox>
-
-            <GroupBox Header="Camera Status" Padding="10" Margin="0,12,0,0">
-                <StackPanel>
-                    <TextBlock x:Name="DeviceTextBlock" Text="Connect to load camera status."/>
-                    <TextBlock x:Name="RangeTextBlock" Margin="0,4,0,0"/>
-                    <TextBlock x:Name="SwitchOverTextBlock" Margin="0,4,0,0" TextWrapping="Wrap"/>
-                    <TextBlock x:Name="RampingTextBlock" Margin="0,4,0,0"/>
-                    <Button x:Name="RefreshButton" Content="Refresh" HorizontalAlignment="Right"
-                            Margin="0,8,0,0" Padding="10,4" Click="Refresh_Click" IsEnabled="False"/>
-                </StackPanel>
-            </GroupBox>
-
-            <GroupBox Header="Zoom" Padding="10" Margin="0,12,0,0">
-                <StackPanel>
-                    <TextBlock x:Name="ZoomTextBlock" Text="Current zoom: not reported"/>
-                    <Slider x:Name="ZoomSlider" Minimum="1" Maximum="1" IsEnabled="False"
-                            Margin="0,8,0,0" ValueChanged="ZoomSlider_ValueChanged"/>
-                    <DockPanel Margin="0,8,0,0">
-                        <TextBlock Text="Speed" VerticalAlignment="Center" Margin="0,0,10,0"/>
-                        <TextBlock x:Name="SpeedTextBlock" DockPanel.Dock="Right" Text="2.0"
-                                   Width="32" TextAlignment="Right" VerticalAlignment="Center"/>
-                        <Slider x:Name="SpeedSlider" Minimum="0.1" Maximum="10" Value="2"
-                                TickFrequency="0.1" IsSnapToTickEnabled="True" IsEnabled="False"
-                                ValueChanged="SpeedSlider_ValueChanged"/>
+                    <DockPanel Grid.Row="2" Margin="0,8,0,0">
+                        <StackPanel Orientation="Horizontal" DockPanel.Dock="Right">
+                            <ComboBox x:Name="PhotoFormatComboBox" SelectedIndex="0" Width="90" Margin="0,0,8,0">
+                                <ComboBoxItem Content="JPEG" Tag="jpeg"/>
+                                <ComboBoxItem Content="BGRA" Tag="bgra"/>
+                            </ComboBox>
+                            <Button x:Name="CapturePhotoButton" Content="Capture photo" Padding="12,4"
+                                    IsEnabled="False" Click="CapturePhoto_Click"/>
+                        </StackPanel>
+                        <TextBlock x:Name="VideoInfoTextBlock" Text="" VerticalAlignment="Center"
+                                   TextTrimming="CharacterEllipsis"/>
                     </DockPanel>
-                    <WrapPanel Margin="0,10,0,0">
-                        <Button x:Name="ZoomOutButton" Content="Zoom out" Tag="out" IsEnabled="False"
-                                Padding="12,6" Margin="0,0,8,0"
-                                PreviewMouseLeftButtonDown="Zoom_PreviewMouseLeftButtonDown"
-                                PreviewMouseLeftButtonUp="Zoom_PreviewMouseLeftButtonUp"
-                                MouseLeave="Zoom_MouseLeave" LostMouseCapture="Zoom_LostMouseCapture"
-                                PreviewTouchDown="Zoom_PreviewTouchDown" PreviewTouchUp="Zoom_PreviewTouchUp"
-                                TouchLeave="Zoom_TouchLeave" LostTouchCapture="Zoom_LostTouchCapture"/>
-                        <Button x:Name="ZoomInButton" Content="Zoom in" Tag="in" IsEnabled="False"
-                                Padding="12,6"
-                                PreviewMouseLeftButtonDown="Zoom_PreviewMouseLeftButtonDown"
-                                PreviewMouseLeftButtonUp="Zoom_PreviewMouseLeftButtonUp"
-                                MouseLeave="Zoom_MouseLeave" LostMouseCapture="Zoom_LostMouseCapture"
-                                PreviewTouchDown="Zoom_PreviewTouchDown" PreviewTouchUp="Zoom_PreviewTouchUp"
-                                TouchLeave="Zoom_TouchLeave" LostTouchCapture="Zoom_LostTouchCapture"/>
-                    </WrapPanel>
-                    <TextBlock Text="Hold a zoom button to zoom continuously." Margin="0,6,0,0" TextWrapping="Wrap"/>
-                </StackPanel>
+                    <DockPanel Grid.Row="3" Margin="0,8,0,0">
+                        <StackPanel Orientation="Horizontal" DockPanel.Dock="Right">
+                            <Button x:Name="ShowLiveButton" Content="Show live video" Padding="10,4"
+                                    IsEnabled="False" Margin="0,0,8,0" Click="ShowLiveVideo_Click"/>
+                            <Button x:Name="SavePhotoButton" Content="Save image" Padding="10,4"
+                                    IsEnabled="False" Click="SavePhoto_Click"/>
+                        </StackPanel>
+                        <TextBlock x:Name="PhotoStatusTextBlock" Text="" VerticalAlignment="Center"
+                                   TextTrimming="CharacterEllipsis"/>
+                    </DockPanel>
+                </Grid>
             </GroupBox>
 
-            <GroupBox Header="Additional Camera Controls" Padding="10" Margin="0,12,0,0">
+            <ScrollViewer Grid.Row="2" Grid.Column="1" VerticalScrollBarVisibility="Auto"
+                          HorizontalScrollBarVisibility="Disabled" Margin="0,4,0,0">
                 <StackPanel>
-                    <ComboBox IsEnabled="False" SelectedIndex="0">
-                        <ComboBoxItem Content="Rear camera"/>
-                        <ComboBoxItem Content="Front camera"/>
-                    </ComboBox>
-                    <CheckBox Content="Torch" IsEnabled="False" Margin="0,6,0,0"/>
-                    <CheckBox Content="Autofocus" IsEnabled="False" IsChecked="True" Margin="0,6,0,0"/>
-                    <TextBlock Text="Front/rear camera, torch, and autofocus are unavailable because this server does not advertise those controls."
-                               Margin="0,6,0,0" TextWrapping="Wrap"/>
+                    <GroupBox Header="Camera Status" Padding="10">
+                        <StackPanel>
+                            <TextBlock x:Name="DeviceTextBlock" Text="Connect to load camera status."/>
+                            <TextBlock x:Name="RangeTextBlock" Margin="0,4,0,0"/>
+                            <TextBlock x:Name="SwitchOverTextBlock" Margin="0,4,0,0" TextWrapping="Wrap"/>
+                            <TextBlock x:Name="RampingTextBlock" Margin="0,4,0,0"/>
+                            <Button x:Name="RefreshButton" Content="Refresh" HorizontalAlignment="Right"
+                                    Margin="0,8,0,0" Padding="10,4" Click="Refresh_Click" IsEnabled="False"/>
+                        </StackPanel>
+                    </GroupBox>
+
+                    <GroupBox Header="Zoom" Padding="10" Margin="0,10,0,0">
+                        <StackPanel>
+                            <TextBlock x:Name="ZoomTextBlock" Text="Current zoom: not reported"/>
+                            <Slider x:Name="ZoomSlider" Minimum="1" Maximum="1" IsEnabled="False"
+                                    Margin="0,8,0,0" ValueChanged="ZoomSlider_ValueChanged"/>
+                            <DockPanel Margin="0,8,0,0">
+                                <TextBlock Text="Speed" VerticalAlignment="Center" Margin="0,0,10,0"/>
+                                <TextBlock x:Name="SpeedTextBlock" DockPanel.Dock="Right" Text="2.0"
+                                           Width="32" TextAlignment="Right" VerticalAlignment="Center"/>
+                                <Slider x:Name="SpeedSlider" Minimum="0.1" Maximum="10" Value="2"
+                                        TickFrequency="0.1" IsSnapToTickEnabled="True" IsEnabled="False"
+                                        ValueChanged="SpeedSlider_ValueChanged"/>
+                            </DockPanel>
+                            <WrapPanel Margin="0,10,0,0">
+                                <Button x:Name="ZoomOutButton" Content="Zoom out" Tag="out" IsEnabled="False"
+                                        Padding="12,6" Margin="0,0,8,0"
+                                        PreviewMouseLeftButtonDown="Zoom_PreviewMouseLeftButtonDown"
+                                        PreviewMouseLeftButtonUp="Zoom_PreviewMouseLeftButtonUp"
+                                        MouseLeave="Zoom_MouseLeave" LostMouseCapture="Zoom_LostMouseCapture"
+                                        PreviewTouchDown="Zoom_PreviewTouchDown" PreviewTouchUp="Zoom_PreviewTouchUp"
+                                        TouchLeave="Zoom_TouchLeave" LostTouchCapture="Zoom_LostTouchCapture"/>
+                                <Button x:Name="ZoomInButton" Content="Zoom in" Tag="in" IsEnabled="False"
+                                        Padding="12,6"
+                                        PreviewMouseLeftButtonDown="Zoom_PreviewMouseLeftButtonDown"
+                                        PreviewMouseLeftButtonUp="Zoom_PreviewMouseLeftButtonUp"
+                                        MouseLeave="Zoom_MouseLeave" LostMouseCapture="Zoom_LostMouseCapture"
+                                        PreviewTouchDown="Zoom_PreviewTouchDown" PreviewTouchUp="Zoom_PreviewTouchUp"
+                                        TouchLeave="Zoom_TouchLeave" LostTouchCapture="Zoom_LostTouchCapture"/>
+                            </WrapPanel>
+                        </StackPanel>
+                    </GroupBox>
+
+                    <GroupBox Header="Additional Camera Controls" Padding="10" Margin="0,10,0,0">
+                        <StackPanel>
+                            <ComboBox IsEnabled="False" SelectedIndex="0">
+                                <ComboBoxItem Content="Rear camera"/>
+                                <ComboBoxItem Content="Front camera"/>
+                            </ComboBox>
+                            <CheckBox Content="Torch" IsEnabled="False" Margin="0,6,0,0"/>
+                            <CheckBox Content="Autofocus" IsEnabled="False" IsChecked="True" Margin="0,6,0,0"/>
+                            <TextBlock Text="Front/rear camera, torch, and autofocus are unavailable because this server does not advertise those controls."
+                                       Margin="0,6,0,0" TextWrapping="Wrap"/>
+                        </StackPanel>
+                    </GroupBox>
                 </StackPanel>
-            </GroupBox>
-        </StackPanel>
-    </ScrollViewer>
-</Window>
+            </ScrollViewer>
+        </Grid>
+    </Window>

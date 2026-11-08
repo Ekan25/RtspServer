@@ -1,3 +1,7 @@
+using System.Buffers.Binary;
+using System.Net;
+using System.Net.Sockets;
+using System.Text;
 using System.Text.Json;
 using CameraController;
 
@@ -13,6 +17,7 @@ internal static class Program
         [
             ("commands and typed responses", CommandsAndResponses),
             ("current macOS response shapes", CurrentResponseShapes),
+            ("authenticated JPEG and BGRA photo transfer", PhotoTransfer),
             ("fragmentation, CRLF and concurrent correlation", FramingAndCorrelation),
             ("server error", ServerError),
             ("invalid client inputs", InvalidInputs),
@@ -116,6 +121,61 @@ internal static class Program
             "Stream-only response should infer running readiness.");
         Check(streamStatus.Message is null, "Stream message is optional.");
         return Task.CompletedTask;
+    }
+
+    private static async Task PhotoTransfer(CancellationToken token)
+    {
+        byte[] jpeg = [0xff, 0xd8, 0xff, 0xd9];
+        ReceivedPhoto jpegPhoto = await PhotoRoundTrip("jpeg", 2, 1, 0, jpeg, token);
+        Check(jpegPhoto.Format == "jpeg" && jpegPhoto.Width == 2 && jpegPhoto.Height == 1 &&
+              jpegPhoto.Data.SequenceEqual(jpeg), "JPEG transfer metadata or payload is incorrect.");
+
+        byte[] bgra = [1, 2, 3, 4, 5, 6, 7, 8];
+        ReceivedPhoto bgraPhoto = await PhotoRoundTrip("bgra", 2, 1, 8, bgra, token);
+        Check(bgraPhoto.Format == "bgra" && bgraPhoto.RowStride == 8 &&
+              bgraPhoto.Data.SequenceEqual(bgra), "BGRA transfer metadata or payload is incorrect.");
+    }
+
+    private static async Task<ReceivedPhoto> PhotoRoundTrip(
+        string format, uint width, uint height, uint stride, byte[] payload, CancellationToken token)
+    {
+        using var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        ushort port = (ushort)((IPEndPoint)listener.LocalEndpoint).Port;
+        var info = new PhotoTransferInfo
+        {
+            TransferId = "test-transfer",
+            TransferHost = "127.0.0.1",
+            TransferPort = port,
+            TransferToken = "test-token",
+            Format = format
+        };
+
+        Task<ReceivedPhoto> receive = PhotoTransferClient.ReceiveAsync(info, token);
+        using TcpClient peer = await listener.AcceptTcpClientAsync(token);
+        NetworkStream stream = peer.GetStream();
+        byte[] request = new byte[12 + info.TransferId.Length + info.TransferToken.Length];
+        await stream.ReadExactlyAsync(request, token);
+        Check(request.AsSpan(0, 4).SequenceEqual("LVP1"u8) &&
+              BinaryPrimitives.ReadUInt16BigEndian(request.AsSpan(4, 2)) == 1 &&
+              BinaryPrimitives.ReadUInt16BigEndian(request.AsSpan(6, 2)) == info.TransferId.Length &&
+              BinaryPrimitives.ReadUInt16BigEndian(request.AsSpan(8, 2)) == info.TransferToken.Length,
+            "Photo authentication header is incorrect.");
+        Check(Encoding.UTF8.GetString(request, 12, info.TransferId.Length) == info.TransferId &&
+              Encoding.UTF8.GetString(request, 12 + info.TransferId.Length, info.TransferToken.Length) == info.TransferToken,
+            "Photo transfer credentials are incorrect.");
+
+        byte[] response = new byte[32];
+        "LVP1"u8.CopyTo(response);
+        BinaryPrimitives.WriteUInt16BigEndian(response.AsSpan(4, 2), 1);
+        BinaryPrimitives.WriteUInt16BigEndian(response.AsSpan(8, 2), format == "jpeg" ? (ushort)1 : (ushort)2);
+        BinaryPrimitives.WriteUInt32BigEndian(response.AsSpan(12, 4), width);
+        BinaryPrimitives.WriteUInt32BigEndian(response.AsSpan(16, 4), height);
+        BinaryPrimitives.WriteUInt32BigEndian(response.AsSpan(20, 4), stride);
+        BinaryPrimitives.WriteUInt64BigEndian(response.AsSpan(24, 8), (ulong)payload.Length);
+        await stream.WriteAsync(response, token);
+        await stream.WriteAsync(payload, token);
+        return await receive.WaitAsync(token);
     }
 
     private static async Task CommandsAndResponses(CancellationToken token)

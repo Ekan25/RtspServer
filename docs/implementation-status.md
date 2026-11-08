@@ -47,15 +47,15 @@ Status definitions:
 | Bonjour discovery | Planned | Not present in the merged Windows implementation |
 | Auto Connect | Implemented | Persisted manual endpoint |
 | Auto Stream | Implemented | Explicit stop suppresses automatic start for the connection lifecycle |
-| High-resolution image reception | Unknown | |
-| Image magnification | Unknown | |
-| Save image dialog | Unknown | |
+| High-resolution image reception | Implemented | Authenticated `LVP1` TCP transfer; JPEG and BGRA with bounded payload and validated dimensions/stride; physical-device verification pending |
+| Image magnification | Partial | Aspect-preserving preview; dedicated zoom interaction not implemented |
+| Save image dialog | Implemented | JPEG saved directly; BGRA converted to PNG; physical-device verification pending |
 
 ## Known Issues
 
 - Photo capture requires physical-device verification for camera-specific maximum resolution, concurrent RTSP behavior, and BGRA channel/stride output.
 - Image transfer v1 is plaintext and intended only for trusted local networks; see `docs/protocol.md`.
-- Windows WPF status is retained from the merged report and was not revalidated during this macOS-only merge resolution.
+- Windows photo transfer and WPF preview have loopback/UI coverage, but still need physical iPhone verification for full-resolution capture, concurrent RTSP behavior, and BGRA channel/stride output.
 
 ## Next Steps
 

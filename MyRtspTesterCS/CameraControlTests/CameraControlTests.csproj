@@ -8,5 +8,6 @@
   <ItemGroup>
     <Compile Include="..\MyRtspTeser.CS\CameraProtocol.cs" Link="CameraProtocol.cs" />
     <Compile Include="..\MyRtspTeser.CS\CameraControlClient.cs" Link="CameraControlClient.cs" />
+    <Compile Include="..\MyRtspTeser.CS\PhotoTransferClient.cs" Link="PhotoTransferClient.cs" />
   </ItemGroup>
 </Project>

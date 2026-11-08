@@ -6,6 +6,7 @@ using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using Microsoft.Win32;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 
@@ -39,6 +40,9 @@ public partial class MainWindow : Window
     private ulong _renderedSequence;
     private int _renderPending;
     private WriteableBitmap? _videoBitmap;
+    private ReceivedPhoto? _capturedPhoto;
+    private BitmapSource? _capturedImage;
+    private bool _capturingPhoto;
     private readonly Action _renderLatestFrameAction;
     private PlaybackState _playbackState = PlaybackState.Disconnected;
 
@@ -333,6 +337,124 @@ public partial class MainWindow : Window
             _suppressAutoStream = false;
             StartPlayback();
         }
+    }
+
+    private async void CapturePhoto_Click(object sender, RoutedEventArgs e)
+    {
+        if (_capturingPhoto || _closing || _session is not { } session || !IsCurrent(session))
+            return;
+        if (!session.Commands.Contains("capturePhoto"))
+        {
+            ErrorTextBlock.Text = "The camera does not support high-resolution photo capture.";
+            return;
+        }
+
+        string format = (PhotoFormatComboBox.SelectedItem as ComboBoxItem)?.Tag as string ?? "jpeg";
+        _capturingPhoto = true;
+        PhotoStatusTextBlock.Text = "Capturing full-resolution image...";
+        ErrorTextBlock.Text = "";
+        UpdateControls();
+        try
+        {
+            CameraResponse? response = await RunCommandAsync(session, "capturePhoto", new { format }, session.Token);
+            if (response?.Photo is not { } transferInfo || !IsCurrent(session))
+                return;
+
+            PhotoStatusTextBlock.Text = "Receiving image...";
+            ReceivedPhoto photo = await PhotoTransferClient.ReceiveAsync(transferInfo, session.Token);
+            BitmapSource image = await Task.Run(() => DecodePhoto(photo), session.Token);
+            if (!IsCurrent(session))
+                return;
+
+            _capturedPhoto = photo;
+            _capturedImage = image;
+            PhotoImage.Source = image;
+            PhotoImage.Visibility = Visibility.Visible;
+            VideoImage.Visibility = Visibility.Collapsed;
+            VideoStateTextBlock.Visibility = Visibility.Collapsed;
+            PhotoStatusTextBlock.Text = $"{photo.Width} x {photo.Height} {photo.Format.ToUpperInvariant()}";
+            UpdateControls();
+        }
+        catch (OperationCanceledException) when (session.Token.IsCancellationRequested || _closing)
+        {
+        }
+        catch (Exception ex)
+        {
+            PhotoStatusTextBlock.Text = "Photo capture failed.";
+            ErrorTextBlock.Text = ex.Message;
+        }
+        finally
+        {
+            _capturingPhoto = false;
+            UpdateControls();
+        }
+    }
+
+    private void ShowLiveVideo_Click(object sender, RoutedEventArgs e)
+    {
+        PhotoImage.Visibility = Visibility.Collapsed;
+        VideoImage.Visibility = Visibility.Visible;
+        VideoStateTextBlock.Visibility = _playbackState == PlaybackState.Playing
+            ? Visibility.Collapsed : Visibility.Visible;
+    }
+
+    private async void SavePhoto_Click(object sender, RoutedEventArgs e)
+    {
+        if (_capturedPhoto is not { } photo || _capturedImage is not { } image)
+            return;
+
+        bool isJpeg = photo.Format == "jpeg";
+        var dialog = new SaveFileDialog
+        {
+            FileName = $"capture-{DateTime.Now:yyyyMMdd-HHmmss}.{(isJpeg ? "jpg" : "png")}",
+            Filter = isJpeg ? "JPEG image|*.jpg;*.jpeg" : "PNG image|*.png",
+            DefaultExt = isJpeg ? ".jpg" : ".png",
+            AddExtension = true,
+            OverwritePrompt = true
+        };
+        if (dialog.ShowDialog(this) != true)
+            return;
+
+        try
+        {
+            byte[] data = isJpeg ? photo.Data : await Task.Run(() => EncodePng(image));
+            await File.WriteAllBytesAsync(dialog.FileName, data);
+            PhotoStatusTextBlock.Text = $"Saved {Path.GetFileName(dialog.FileName)}";
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or NotSupportedException)
+        {
+            ErrorTextBlock.Text = $"Could not save photo: {ex.Message}";
+        }
+    }
+
+    private static BitmapSource DecodePhoto(ReceivedPhoto photo)
+    {
+        if (photo.Format == "jpeg")
+        {
+            using var stream = new MemoryStream(photo.Data, writable: false);
+            var image = new BitmapImage();
+            image.BeginInit();
+            image.CacheOption = BitmapCacheOption.OnLoad;
+            image.StreamSource = stream;
+            image.EndInit();
+            image.Freeze();
+            return image;
+        }
+
+        var bitmap = new WriteableBitmap(photo.Width, photo.Height, 96, 96,
+            System.Windows.Media.PixelFormats.Pbgra32, null);
+        bitmap.WritePixels(new Int32Rect(0, 0, photo.Width, photo.Height), photo.Data, photo.RowStride, 0);
+        bitmap.Freeze();
+        return bitmap;
+    }
+
+    private static byte[] EncodePng(BitmapSource image)
+    {
+        var encoder = new PngBitmapEncoder();
+        encoder.Frames.Add(BitmapFrame.Create(image));
+        using var stream = new MemoryStream();
+        encoder.Save(stream);
+        return stream.ToArray();
     }
 
     private void StartPlayback()
@@ -1075,6 +1197,10 @@ public partial class MainWindow : Window
         bool canStream = available && _session!.Commands.Contains("startStream") && _session.Commands.Contains("stopStream");
         PlaybackButton.IsEnabled = canStream;
         PlaybackButton.Content = _playbackRequested ? "Stop video" : "Start video";
+        CapturePhotoButton.IsEnabled = available && !_capturingPhoto && _session!.Commands.Contains("capturePhoto");
+        CapturePhotoButton.Content = _capturingPhoto ? "Capturing..." : "Capture photo";
+        ShowLiveButton.IsEnabled = _capturedPhoto is not null;
+        SavePhotoButton.IsEnabled = _capturedPhoto is not null;
         StatusTextBlock.Text = _connecting ? "Connecting..." : connected ? "Connected" :
             _connectionFailed ? "Connection failed" : "Disconnected";
     }
