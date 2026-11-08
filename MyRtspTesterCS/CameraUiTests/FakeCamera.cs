@@ -14,6 +14,7 @@ internal sealed class FakeCamera : IAsyncDisposable
     private readonly Task _loop;
     private double _factor = 2;
     private bool _ramping;
+    private string _streamState = "running";
     private int _rejectStop;
 
     public FakeCamera(params string[] commands)
@@ -71,23 +72,31 @@ internal sealed class FakeCamera : IAsyncDisposable
                 if (command == "setZoom") _factor = request.GetProperty("factor").GetDouble();
                 if (command == "rampZoom") _ramping = true;
                 if (command == "stopZoom" && !rejected) _ramping = false;
+                if (command == "startStream") _streamState = "running";
+                if (command == "stopStream") _streamState = "stopped";
                 var response = new
                 {
                     id = request.GetProperty("id").GetString(),
                     ok = !rejected,
                     error = rejected ? new { code = "camera_error", message = "Cannot stop zoom" } : null,
                     commands = command == "capabilities" ? Commands : null,
-                    status = new
+                    status = command is "capabilities" or "getStreamStatus" or "startStream" or "stopStream"
+                        ? null
+                        : new
                     {
                         factor = _factor, minFactor = 1.0, maxFactor = 8.0,
                         isRamping = _ramping, deviceName = "Fake camera",
                         switchOverFactors = new[] { 2.0, 4.0 }
-                    }
+                    },
+                    stream = command is "getStreamStatus" or "startStream" or "stopStream"
+                        ? new { state = _streamState, message = (string?)null }
+                        : null
                 };
                 _gates.TryGetValue(command, out var queue);
                 Gate? gate = null;
                 queue?.TryDequeue(out gate);
-                responses.Add(RespondAsync(stream, writeLock, JsonSerializer.Serialize(response), gate, connectionCancel.Token));
+                string responseJson = JsonSerializer.Serialize(response);
+                responses.Add(RespondAsync(stream, writeLock, responseJson, gate, connectionCancel.Token));
             }
         }
         finally

@@ -12,6 +12,7 @@ internal static class Program
         (string Name, Func<CancellationToken, Task> Run)[] tests =
         [
             ("commands and typed responses", CommandsAndResponses),
+            ("current macOS response shapes", CurrentResponseShapes),
             ("fragmentation, CRLF and concurrent correlation", FramingAndCorrelation),
             ("server error", ServerError),
             ("invalid client inputs", InvalidInputs),
@@ -97,6 +98,24 @@ internal static class Program
         Check(status.DeviceName == "Loopback camera", "Incorrect device.");
         Check(status.SwitchOverFactors.SequenceEqual([2.0, 4.0]), "Incorrect switch-over factors.");
         Check(response.StreamStatus is { State: "ready", IsReady: true, IsStreaming: true }, "Incorrect stream status.");
+    }
+
+    private static Task CurrentResponseShapes(CancellationToken token)
+    {
+        const string capabilitiesJson = """{"id":"caps","ok":true,"commands":["getStreamStatus","startStream","stopStream"],"capabilities":{"commands":["getStreamStatus","startStream","stopStream"]}}""";
+        const string streamJson = """{"id":"stream","ok":true,"stream":{"state":"running"}}""";
+        CameraResponse capabilities = JsonSerializer.Deserialize<CameraResponse>(capabilitiesJson)
+            ?? throw new Exception("Capabilities response was empty.");
+        CameraResponse stream = JsonSerializer.Deserialize<CameraResponse>(streamJson)
+            ?? throw new Exception("Stream response was empty.");
+        CameraStreamStatus streamStatus = stream.Stream
+            ?? throw new Exception("Stream-only response did not contain stream status.");
+        Check(capabilities.Status is null && capabilities.Commands?.Contains("startStream") == true,
+            "Capabilities-only response should not require camera status.");
+        Check(stream.Status is null && streamStatus is { State: "running", IsReady: true, IsStreaming: true },
+            "Stream-only response should infer running readiness.");
+        Check(streamStatus.Message is null, "Stream message is optional.");
+        return Task.CompletedTask;
     }
 
     private static async Task CommandsAndResponses(CancellationToken token)

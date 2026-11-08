@@ -23,6 +23,8 @@ internal static class Program
             try
             {
                 await Run("connection, gating and status", ConnectionAndGating);
+                await Run("BGRA frame render buffer layout", FrameRenderBufferLayout);
+                await Run("background camera response dispatch", BackgroundCameraResponseDispatch);
                 await Run("debounce and stale status", SliderAndStaleStatus);
                 await Run("hold/release and deactivation", HoldAndDeactivate);
                 await Run("queued hold and failed stop", QueuedHoldAndFailedStop);
@@ -58,13 +60,15 @@ internal static class Program
         capabilities.Open();
         await connecting;
         Check(ui.Status.Text == "Connected", "connection status");
+        Check(string.IsNullOrEmpty(ui.Error.Text), "status-free capabilities and stream responses are accepted");
         Check(ui.Slider.IsEnabled && !ui.In.IsEnabled && !ui.Out.IsEnabled && !ui.Speed.IsEnabled,
             "partial capabilities gate controls");
         Check(ui.Refresh.IsEnabled && ui.Device.Text == "Device: Fake camera", "status and refresh");
         Check(ui.Range.Text == "Zoom range: 1.0x - 8.0x" && ui.Switch.Text.Contains("2.0x") &&
             ui.Ramping.Text == "Ramping: No" && ui.Zoom.Text == "Current zoom: 2.00x", "status fields");
         Check(ui.Slider.Minimum == 1 && ui.Slider.Maximum == 8 && ui.Slider.Value == 2, "slider range");
-        Check(camera.Count("capabilities") == 1 && camera.Count("status") == 1 && camera.Count("setZoom") == 0,
+          Check(camera.Count("getStreamStatus") == 1 && camera.Count("capabilities") == 1 &&
+              camera.Count("status") == 1 && camera.Count("setZoom") == 0,
              "initial requests do not feed slider changes back");
         using (var settings = JsonDocument.Parse(File.ReadAllText(ui.SettingsPath)))
         {
@@ -114,6 +118,36 @@ internal static class Program
         Check(ui.Slider.Value == 6.5, "old refresh must not overwrite newer slider input");
         setGate.Open();
         await Until(() => ui.Zoom.Text.Contains("6.50"), "new slider response");
+    }
+
+    private static async Task BackgroundCameraResponseDispatch()
+    {
+        await using var camera = FullCamera();
+        await using var ui = new Ui();
+        await ui.Connect(camera);
+        object session = typeof(MainWindow).GetField("_session", PrivateInstance)!.GetValue(ui.Window)!;
+        Task initialize = Task.Run(() => (Task)Invoke(ui.Window, "InitializeCameraControlsAsync", session)!);
+        await initialize.WaitAsync(Timeout);
+        Check(ui.Device.Text == "Device: Fake camera" && string.IsNullOrEmpty(ui.Error.Text),
+            "background camera responses are applied on the WPF dispatcher");
+    }
+
+    private static async Task FrameRenderBufferLayout()
+    {
+        await using var ui = new Ui();
+        byte[] frame = new byte[2 * 2 * 4];
+        var frameInfo = new RtspVideoPlayer.RtspFrameInfo
+        {
+            Width = 2,
+            Height = 2,
+            Stride = 2 * 4,
+            Sequence = 1
+        };
+        typeof(MainWindow).GetField("_renderBuffer", PrivateInstance)!.SetValue(ui.Window, frame);
+        typeof(MainWindow).GetField("_latestFrameInfo", PrivateInstance)!.SetValue(ui.Window, frameInfo);
+        await ui.Window.Dispatcher.InvokeAsync(() => Invoke(ui.Window, "RenderLatestFrame"));
+        Check(ui.Video.Source is System.Windows.Media.Imaging.WriteableBitmap { PixelWidth: 2, PixelHeight: 2 },
+            "WriteableBitmap accepts the packed BGRA row stride and zero array offset");
     }
 
     private static async Task HoldAndDeactivate()
@@ -271,6 +305,7 @@ internal static class Program
         public TextBlock Switch => Find<TextBlock>("SwitchOverTextBlock");
         public TextBlock Ramping => Find<TextBlock>("RampingTextBlock");
         public TextBlock Zoom => Find<TextBlock>("ZoomTextBlock");
+        public Image Video => Find<Image>("VideoImage");
 
         public async Task Connect(FakeCamera camera)
         {
@@ -281,7 +316,6 @@ internal static class Program
             await Until(() => Status.Text == "Connected" && camera.Count("status") > previous &&
                               Device.Text == "Device: Fake camera", "connection and initial status");
         }
-
         public async Task Disconnect()
         {
             Click(Connection);

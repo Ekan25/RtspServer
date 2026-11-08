@@ -235,7 +235,7 @@ public partial class MainWindow : Window
                 CancelAutoConnectLoop();
                 CancelSlider();
                 await StopContinuousZoomAsync();
-                await StopPlaybackAsync(sendServerStop: true);
+                await StopPlaybackAsync(sendServerStop: false);
                 ClearSession();
                 await _client.DisconnectAsync();
             }
@@ -288,19 +288,40 @@ public partial class MainWindow : Window
 
     private async Task InitializeCameraAsync(CameraSession session)
     {
+        CameraResponse? response = await RunStreamCommandAsync(session, "getStreamStatus", session.Token);
+        if (response is null || !IsCurrent(session))
+            return;
+
+        session.Commands.UnionWith(["getStreamStatus", "startStream", "stopStream"]);
+        CameraStreamStatus? streamStatus = response.Stream ?? response.StreamStatus;
+        if (streamStatus is null)
+        {
+            ErrorTextBlock.Text = "The camera did not report stream status.";
+            return;
+        }
+        UpdateControls();
+
+        if (streamStatus.IsReady)
+            await InitializeCameraControlsAsync(session);
+
+        if (AutoStreamCheckBox.IsChecked == true && !_suppressAutoStream && IsCurrent(session))
+            StartPlayback();
+    }
+
+    private async Task InitializeCameraControlsAsync(CameraSession session)
+    {
         var capabilities = await RunCommandAsync(session, "capabilities");
         if (capabilities is null || !IsCurrent(session))
             return;
-        if (capabilities.Commands is null)
+        await Dispatcher.InvokeAsync(() =>
         {
-            ErrorTextBlock.Text = "The camera did not report its supported commands.";
-            return;
-        }
-        session.Commands = new HashSet<string>(capabilities.Commands, StringComparer.Ordinal);
-        UpdateControls();
-        var status = await RunCommandAsync(session, "status", revision: session.Revision);
-        if (status is not null && AutoStreamCheckBox.IsChecked == true && !_suppressAutoStream && IsCurrent(session))
-            StartPlayback();
+            if (!IsCurrent(session))
+                return;
+            if (capabilities.Commands is not null)
+                session.Commands.UnionWith(capabilities.Commands);
+            UpdateControls();
+        }).Task.ConfigureAwait(false);
+        await RunCommandAsync(session, "status").ConfigureAwait(false);
     }
 
     private void PlaybackButton_Click(object sender, RoutedEventArgs e)
@@ -476,32 +497,42 @@ public partial class MainWindow : Window
 
     private async Task WaitForStreamReadyAsync(CameraSession session, CancellationToken cancellationToken)
     {
-        CameraResponse status = await RunStreamCommandAsync(session, "status", cancellationToken).ConfigureAwait(false);
-        CameraStreamStatus stream = status.StreamStatus
+        CameraResponse status = await RunStreamCommandAsync(session, "getStreamStatus", cancellationToken).ConfigureAwait(false)
+            ?? throw new IOException("Could not query camera stream status.");
+        CameraStreamStatus stream = status.Stream ?? status.StreamStatus
             ?? throw new InvalidDataException("The camera did not report stream readiness.");
         if (stream.IsReady)
+        {
+            await InitializeCameraControlsAsync(session).ConfigureAwait(false);
             return;
-        if (stream.State is "stopped" or "error")
-            await RunStreamCommandAsync(session, "startStream", cancellationToken).ConfigureAwait(false);
+        }
+        if (stream.State is not ("starting" or "stopping"))
+            _ = await RunStreamCommandAsync(session, "startStream", cancellationToken).ConfigureAwait(false)
+                ?? throw new IOException("Could not request camera stream startup.");
 
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(TimeSpan.FromSeconds(30));
         while (true)
         {
             await Task.Delay(250, timeout.Token).ConfigureAwait(false);
-            status = await RunStreamCommandAsync(session, "status", timeout.Token).ConfigureAwait(false);
-            stream = status.StreamStatus
+            status = await RunStreamCommandAsync(session, "getStreamStatus", timeout.Token).ConfigureAwait(false)
+                ?? throw new IOException("Could not query camera stream status.");
+            stream = status.Stream ?? status.StreamStatus
                 ?? throw new InvalidDataException("The camera did not report stream readiness.");
             if (stream.IsReady)
+            {
+                await InitializeCameraControlsAsync(session).ConfigureAwait(false);
                 return;
+            }
             if (stream.State == "error")
-                throw new IOException("The camera could not start its video stream.");
-            if (stream.State == "stopped")
-                await RunStreamCommandAsync(session, "startStream", timeout.Token).ConfigureAwait(false);
+                throw new IOException(stream.Message ?? "The camera could not start its video stream.");
+            if (stream.State is not ("starting" or "stopping"))
+                _ = await RunStreamCommandAsync(session, "startStream", timeout.Token).ConfigureAwait(false)
+                    ?? throw new IOException("Could not request camera stream startup.");
         }
     }
 
-    private async Task<CameraResponse> RunStreamCommandAsync(
+    private async Task<CameraResponse?> RunStreamCommandAsync(
         CameraSession session, string command, CancellationToken cancellationToken)
     {
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(session.Token, cancellationToken);
@@ -516,6 +547,19 @@ public partial class MainWindow : Window
                     ApplyResponse(session, response, null);
             }).Task.ConfigureAwait(false);
             return response;
+        }
+        catch (OperationCanceledException) when (linked.IsCancellationRequested)
+        {
+            return null;
+        }
+        catch (Exception ex)
+        {
+            await Dispatcher.InvokeAsync(() =>
+            {
+                if (IsCurrent(session) && !_closing)
+                    ErrorTextBlock.Text = ex.Message;
+            }).Task.ConfigureAwait(false);
+            return null;
         }
         finally
         {
@@ -569,7 +613,7 @@ public partial class MainWindow : Window
                     Trace.TraceInformation($"WPF video surface resized to {info.Width}x{info.Height}.");
                 }
                 _videoBitmap.WritePixels(new Int32Rect(0, 0, (int)info.Width, (int)info.Height),
-                    _renderBuffer, checked((int)(info.Stride * info.Height)), (int)info.Stride);
+                    _renderBuffer, (int)info.Stride, 0);
                 _renderedSequence = info.Sequence;
                 VideoStateTextBlock.Visibility = Visibility.Collapsed;
                 double frameRate = info.FrameRateDenominator == 0 ? 0 :
@@ -635,7 +679,13 @@ public partial class MainWindow : Window
                     return null;
                 CameraResponse response = await _client.SendCommandAsync(command, parameters, linked.Token);
                 if (IsCurrent(session) && !linked.IsCancellationRequested)
-                    ApplyResponse(session, response, revision);
+                {
+                    await Dispatcher.InvokeAsync(() =>
+                    {
+                        if (IsCurrent(session) && !linked.IsCancellationRequested)
+                            ApplyResponse(session, response, revision);
+                    }).Task.ConfigureAwait(false);
+                }
                 return response;
             }
             finally
@@ -649,25 +699,39 @@ public partial class MainWindow : Window
         }
         catch (Exception ex)
         {
-            if (IsCurrent(session) && !_closing)
-                ErrorTextBlock.Text = ex.Message;
+            await Dispatcher.InvokeAsync(() =>
+            {
+                if (IsCurrent(session) && !_closing)
+                    ErrorTextBlock.Text = ex.Message;
+            }).Task.ConfigureAwait(false);
             return null;
         }
     }
 
     private void ApplyResponse(CameraSession session, CameraResponse response, long? revision)
     {
+        if (revision.HasValue && revision.Value != session.Revision)
+            return;
+
+        CameraStreamStatus? streamStatus = response.Stream ?? response.StreamStatus;
+        if (streamStatus is not null)
+        {
+            session.StreamStatus = streamStatus;
+            if (!_playbackRequested)
+                VideoStateTextBlock.Text = streamStatus.State;
+        }
+
         if (response.Status is not { } status)
-            throw new InvalidDataException("The camera response did not include status.");
+        {
+            UpdateControls();
+            return;
+        }
         if (!double.IsFinite(status.MinFactor) || !double.IsFinite(status.MaxFactor) ||
             !double.IsFinite(status.Factor) || status.MinFactor <= 0 ||
             status.MaxFactor < status.MinFactor || status.Factor < status.MinFactor ||
             status.Factor > status.MaxFactor || status.DeviceName is null ||
             status.SwitchOverFactors is null || status.SwitchOverFactors.Any(f => !double.IsFinite(f)))
             throw new InvalidDataException("The camera reported invalid status.");
-        if (revision.HasValue && revision.Value != session.Revision)
-            return;
-
         session.Status = status;
         DeviceTextBlock.Text = $"Device: {status.DeviceName}";
         RangeTextBlock.Text = $"Zoom range: {status.MinFactor:0.0}x - {status.MaxFactor:0.0}x";
@@ -1035,7 +1099,7 @@ public partial class MainWindow : Window
             if (_autoConnectTask is { } autoConnectTask)
                 await autoConnectTask;
             await StopContinuousZoomAsync();
-            await StopPlaybackAsync(sendServerStop: true);
+            await StopPlaybackAsync(sendServerStop: false);
             ClearSession();
             _client.ConnectionChanged -= Client_ConnectionChanged;
             _client.Error -= Client_Error;
@@ -1079,6 +1143,7 @@ public partial class MainWindow : Window
         public SemaphoreSlim CommandLock { get; } = new(1, 1);
         public HashSet<string> Commands { get; set; } = new(StringComparer.Ordinal);
         public CameraStatus? Status { get; set; }
+        public CameraStreamStatus? StreamStatus { get; set; }
         public long Revision { get; set; }
     }
 
