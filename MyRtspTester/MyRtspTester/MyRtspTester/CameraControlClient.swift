@@ -11,6 +11,7 @@ enum CameraControlConnectionState: Sendable, Equatable {
 enum CameraControlClientEvent: Sendable {
     case state(CameraControlConnectionState)
     case error(String)
+    case streamState(CameraStreamStatus)
 }
 
 enum CameraControlClientError: LocalizedError, Sendable {
@@ -216,7 +217,11 @@ actor CameraControlClient {
             do {
                 let response = try JSONDecoder().decode(CameraControlResponse.self, from: line)
                 guard let id = response.id else {
-                    eventContinuation?.yield(.error("Received a response without a request ID."))
+                    if response.event == "streamStateChanged", let stream = response.stream {
+                        eventContinuation?.yield(.streamState(stream))
+                    } else {
+                        eventContinuation?.yield(.error("Received an unsupported control event."))
+                    }
                     continue
                 }
                 if response.ok {

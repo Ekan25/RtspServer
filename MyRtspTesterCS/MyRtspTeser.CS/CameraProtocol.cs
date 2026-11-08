@@ -33,6 +33,12 @@ public sealed class CameraResponse
     [JsonPropertyName("commands")]
     public string[]? Commands { get; init; }
 
+    [JsonPropertyName("stream")]
+    public CameraStreamStatus? Stream { get; init; }
+
+    [JsonPropertyName("event")]
+    public string? Event { get; init; }
+
     [JsonPropertyName("error")]
     public CameraError? Error { get; init; }
 
@@ -43,6 +49,7 @@ public sealed class CameraResponse
 public sealed class CameraStreamStatus
 {
     [JsonPropertyName("state")]
+<<<<<<< HEAD
     public string State { get; init; } = "stopped";
 
     [JsonPropertyName("isReady")]
@@ -50,6 +57,13 @@ public sealed class CameraStreamStatus
 
     [JsonPropertyName("isStreaming")]
     public bool IsStreaming { get; init; }
+=======
+    [JsonRequired]
+    public string State { get; init; } = "";
+
+    [JsonPropertyName("message")]
+    public string? Message { get; init; }
+>>>>>>> 8a85150c3ad6bccc935b1ed9d8350131bb627c28
 }
 
 public sealed class CameraStatus

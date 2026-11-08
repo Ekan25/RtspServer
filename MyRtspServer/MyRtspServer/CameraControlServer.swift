@@ -6,6 +6,9 @@ final class CameraControlServer {
     private let handler: CameraCommandHandler
     private let address: String
     private let port: UInt16
+    private let cameraName: String
+    private let cameraIdentifier: UUID
+    private let rtspPort: UInt16
     private var listener: NWListener?
     private var clients: [UUID: Client] = [:]
     private let maxLineBytes = 16_384
@@ -21,10 +24,13 @@ final class CameraControlServer {
         init(_ connection: NWConnection) { self.connection = connection }
     }
 
-    init(address: String, port: UInt16, handler: CameraCommandHandler) {
+    init(address: String, port: UInt16, handler: CameraCommandHandler, cameraName: String, cameraIdentifier: UUID, rtspPort: UInt16) {
         self.address = address
         self.port = port
         self.handler = handler
+        self.cameraName = cameraName
+        self.cameraIdentifier = cameraIdentifier
+        self.rtspPort = rtspPort
     }
 
     func start() throws {
@@ -32,6 +38,17 @@ final class CameraControlServer {
         let parameters = NWParameters.tcp
         parameters.requiredLocalEndpoint = .hostPort(host: NWEndpoint.Host(address), port: port)
         let listener = try NWListener(using: parameters)
+        listener.service = .init(
+            name: cameraName,
+            type: "_lvi-camera._tcp",
+            domain: nil,
+            txtRecord: NetService.data(fromTXTRecord: [
+                "version": Data("1".utf8),
+                "rtsp_port": Data(String(rtspPort).utf8),
+                "rtsp_path": Data("/camera".utf8),
+                "id": Data(cameraIdentifier.uuidString.lowercased().utf8),
+            ])
+        )
         self.listener = listener
         listener.stateUpdateHandler = { [weak self] state in
             if case let .failed(error) = state { self?.onError?("Camera control listener failed: \(error.localizedDescription)") }
@@ -45,6 +62,15 @@ final class CameraControlServer {
             listener?.cancel()
             listener = nil
             for client in Array(clients.values) { remove(client) }
+        }
+    }
+
+    func broadcastStreamState(_ status: CameraStreamStatus) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            for client in self.clients.values {
+                self.send(.success(id: nil, stream: status, event: "streamStateChanged"), to: client)
+            }
         }
     }
 
@@ -82,7 +108,13 @@ final class CameraControlServer {
             var line = Data(client.input[..<newline])
             client.input = Data(client.input.dropFirst(newline + 1))
             if line.last == 13 { line.removeLast() }
-            send(handler.handle(line, client: client.id), to: client)
+            handler.handle(line, client: client.id) { [weak self, weak client] response in
+                guard let self, let client else { return }
+                self.queue.async {
+                    guard self.clients[client.id] != nil else { return }
+                    self.send(response, to: client)
+                }
+            }
             guard clients[client.id] != nil else { return }
         }
         if client.input.count > maxLineBytes { rejectOversized(client) }
@@ -91,7 +123,11 @@ final class CameraControlServer {
     private func rejectOversized(_ client: Client) {
         client.closing = true
         let error = CameraResponse.Failure(code: "line_too_long", message: "Request exceeds the line limit.")
+<<<<<<< HEAD
         send(CameraResponse(id: nil, ok: false, status: nil, streamStatus: nil, commands: nil, error: error), to: client, close: true)
+=======
+        send(.failure(id: nil, CameraControlError(code: error.code, message: error.message)), to: client, close: true)
+>>>>>>> 8a85150c3ad6bccc935b1ed9d8350131bb627c28
     }
 
     private func send(_ response: CameraResponse, to client: Client, close: Bool = false) {

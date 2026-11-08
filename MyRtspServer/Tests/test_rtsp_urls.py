@@ -21,13 +21,14 @@ struct H264Frame {
     let isKeyframe: Bool
     let sps: Data?
     let pps: Data?
+    let trace: FrameTrace?
 }
 enum StreamError: Error { case message(String) }
 let server = RTSPServer(port: UInt16(CommandLine.arguments[1])!)
 try server.start()
 server.offer(H264Frame(nalUnits: [Data([0x65, 0x80])], presentationTime: .zero,
                        isKeyframe: true, sps: Data([0x67, 0x4d, 0, 0x1f]),
-                       pps: Data([0x68, 0xee])))
+                       pps: Data([0x68, 0xee]), trace: nil))
 dispatchMain()
 '''
 
@@ -44,6 +45,7 @@ class RTSPURLTests(unittest.TestCase):
             "xcrun", "swiftc", str(main),
             str(ROOT / "MyRtspServer/RTSPServer.swift"),
             str(ROOT / "MyRtspServer/H264RTPPacketizer.swift"),
+            str(ROOT / "MyRtspServer/LatencyDiagnostics.swift"),
             "-o", str(binary),
         ], check=True)
         with socket.socket() as probe:
@@ -109,6 +111,22 @@ class RTSPURLTests(unittest.TestCase):
     def test_unknown_url_is_not_found(self):
         uri = f"rtsp://127.0.0.1:{self.port}/camera/other"
         self.assertEqual(self.request("OPTIONS", uri)[0], 404)
+
+    def test_udp_setup_returns_server_ports(self):
+        uri = f"rtsp://127.0.0.1:{self.port}/camera"
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as rtp, socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as rtcp:
+            rtp.bind(("127.0.0.1", 0))
+            rtcp.bind(("127.0.0.1", 0))
+            rtp_port = rtp.getsockname()[1]
+            rtcp_port = rtcp.getsockname()[1]
+            status, headers, _ = self.request("SETUP", uri + "/trackID=0", {
+                "Transport": f"RTP/AVP;unicast;client_port={rtp_port}-{rtcp_port}"
+            })
+        self.assertEqual(status, 200)
+        transport = headers["transport"]
+        self.assertIn(f"client_port={rtp_port}-{rtcp_port}", transport)
+        self.assertRegex(transport, r"server_port=[1-9]\d*-[1-9]\d*")
+        self.assertIn("ssrc=", transport)
 
 
 if __name__ == "__main__":
