@@ -119,68 +119,6 @@ struct CameraCapabilities: Codable, Equatable {
     let zoom: CameraZoomStatus
 }
 
-struct CameraStreamStatus: Codable {
-    let state: String
-    let isReady: Bool
-    let isStreaming: Bool
-}
-
-final class CameraStreamCommandBridge: @unchecked Sendable {
-    private let lock = NSLock()
-    private var state = "stopped"
-    private var startHandler: (() -> Void)?
-    private var stopHandler: (() -> Void)?
-
-    func setHandlers(start: @escaping () -> Void, stop: @escaping () -> Void) {
-        lock.lock()
-        startHandler = start
-        stopHandler = stop
-        lock.unlock()
-    }
-
-    func update(state: String) {
-        lock.lock()
-        self.state = state
-        lock.unlock()
-    }
-
-    func status() -> CameraStreamStatus {
-        lock.lock()
-        let current = state
-        lock.unlock()
-        return CameraStreamStatus(state: current, isReady: current == "ready", isStreaming: current == "ready" || current == "starting" || current == "stopping")
-    }
-
-    func start() {
-        lock.lock()
-        guard state != "ready" && state != "starting" && state != "stopping" else {
-            lock.unlock()
-            return
-        }
-        state = "starting"
-        let handler = startHandler
-        lock.unlock()
-        handler?()
-    }
-
-    func stop() {
-        lock.lock()
-        guard state != "stopped" && state != "stopping" else {
-            lock.unlock()
-            return
-        }
-        if state == "error" {
-            state = "stopped"
-            lock.unlock()
-            return
-        }
-        state = "stopping"
-        let handler = stopHandler
-        lock.unlock()
-        handler?()
-    }
-}
-
 struct CameraControlError: LocalizedError {
     let code: String
     let message: String
@@ -251,10 +189,6 @@ struct CameraResponse: Encodable {
     struct Failure: Encodable { let code: String; let message: String }
     let id: CameraRequestID?
     let ok: Bool
-<<<<<<< HEAD
-    let status: CameraZoomStatus?
-    let streamStatus: CameraStreamStatus?
-=======
     let status: CameraStatus?
     let capabilities: CameraCapabilities?
     let videoModes: [CameraVideoMode]?
@@ -266,7 +200,6 @@ struct CameraResponse: Encodable {
     let keepAwake: CameraKeepAwakeStatus?
     let stream: CameraStreamStatus?
     let event: String?
->>>>>>> 8a85150c3ad6bccc935b1ed9d8350131bb627c28
     let commands: [String]?
     let error: Failure?
     let photo: PhotoTransferInfo?
@@ -311,18 +244,9 @@ protocol CameraStreamControlling: AnyObject {
 }
 
 final class CameraCommandHandler {
-<<<<<<< HEAD
-    private let camera: CameraZoomControlling
-    private let stream: CameraStreamCommandBridge
-    init(camera: CameraZoomControlling, stream: CameraStreamCommandBridge) {
-        self.camera = camera
-        self.stream = stream
-    }
-=======
     private let cameraProvider: () -> CameraRemoteControlling?
     private weak var stream: CameraStreamControlling?
     private let queue = DispatchQueue(label: "camera.control.commands", qos: .userInitiated)
->>>>>>> 8a85150c3ad6bccc935b1ed9d8350131bb627c28
 
     init(cameraProvider: @escaping () -> CameraRemoteControlling?, stream: CameraStreamControlling) {
         self.cameraProvider = cameraProvider
@@ -460,28 +384,6 @@ final class CameraCommandHandler {
                 }
             }
             let request = try JSONDecoder().decode(CameraCommand.self, from: data)
-<<<<<<< HEAD
-            id = request.id
-            let status: CameraZoomStatus
-            var streamStatus: CameraStreamStatus?
-            var commands: [String]?
-            switch request.command {
-            case "status", "capabilities":
-                guard request.factor == nil, request.speed == nil else { throw invalidParameters() }
-                status = try camera.zoomStatus()
-                streamStatus = stream.status()
-                if request.command == "capabilities" { commands = ["status", "capabilities", "setZoom", "rampZoom", "stopZoom", "startStream", "stopStream"] }
-            case "startStream":
-                guard request.factor == nil, request.speed == nil else { throw invalidParameters() }
-                status = try camera.zoomStatus()
-                stream.start()
-                streamStatus = stream.status()
-            case "stopStream":
-                guard request.factor == nil, request.speed == nil else { throw invalidParameters() }
-                status = try camera.zoomStatus()
-                stream.stop()
-                streamStatus = stream.status()
-=======
             switch request.command {
             case "status", "getStatus":
                 try noParameters(request)
@@ -537,7 +439,6 @@ final class CameraCommandHandler {
                 guard let level = request.level, level.isFinite, level >= 0, level <= 1 else { throw invalidParameters() }
                 let torch = try camera.setTorch(level: Float(level))
                 return .success(id: id, status: try camera.status(), torch: torch)
->>>>>>> 8a85150c3ad6bccc935b1ed9d8350131bb627c28
             case "setZoom", "rampZoom":
                 guard let factor = request.factor, factor.isFinite, factor > 0 else { throw invalidParameters() }
                 let rate: Float?
@@ -557,14 +458,6 @@ final class CameraCommandHandler {
             default:
                 throw CameraControlError(code: "unknown_command", message: "Unknown command.")
             }
-<<<<<<< HEAD
-            return CameraResponse(id: id, ok: true, status: status, streamStatus: streamStatus, commands: commands, error: nil)
-        } catch {
-            let failure = error as? CameraControlError
-            let code = failure?.code ?? (error is DecodingError || error is CocoaError ? "invalid_request" : "camera_error")
-            let message = failure?.message ?? (code == "invalid_request" ? "Malformed JSON or invalid field types." : error.localizedDescription)
-            return CameraResponse(id: id, ok: false, status: nil, streamStatus: nil, commands: nil, error: .init(code: code, message: message))
-=======
         } catch {
             let failure = error as? CameraControlError
             let code = failure?.code ?? (error is DecodingError || error is CocoaError ? "invalid_request" : "camera_error")
@@ -572,7 +465,6 @@ final class CameraCommandHandler {
                 code: code,
                 message: failure?.message ?? (code == "invalid_request" ? "Malformed JSON or invalid field types." : error.localizedDescription)
             ))
->>>>>>> 8a85150c3ad6bccc935b1ed9d8350131bb627c28
         }
     }
 

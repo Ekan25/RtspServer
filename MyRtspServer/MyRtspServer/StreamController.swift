@@ -84,13 +84,9 @@ final class StreamController: ObservableObject {
 
     private let worker = DispatchQueue(label: "stream.lifecycle", qos: .userInitiated)
     private let counters = StreamCounters()
-<<<<<<< HEAD
-    private let streamCommands = CameraStreamCommandBridge()
-=======
     private let diagnostics = LatencyDiagnostics()
     private let streamStateStore = StreamStateStore()
     private let controlBridge: StreamControlBridge
->>>>>>> 8a85150c3ad6bccc935b1ed9d8350131bb627c28
     // Accessed only by worker.
     private var camera: CameraCapture?
     private var encoder: H264Encoder?
@@ -107,15 +103,9 @@ final class StreamController: ObservableObject {
     private var startAfterStop = false
 
     init() {
-<<<<<<< HEAD
-        streamCommands.setHandlers(
-            start: { [weak self] in Task { @MainActor in self?.start() } },
-            stop: { [weak self] in Task { @MainActor in self?.stop(keepControlServer: true) } })
-=======
         controlBridge = StreamControlBridge(stateStore: streamStateStore)
         cameraName = CameraDiscoverySettings.cameraName
         RemoteCameraController.applySavedKeepAwakePreference()
->>>>>>> 8a85150c3ad6bccc935b1ed9d8350131bb627c28
         thermalObserver = NotificationCenter.default.addObserver(forName: ProcessInfo.thermalStateDidChangeNotification, object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor in self?.thermalState = ProcessInfo.processInfo.thermalState }
         }
@@ -134,10 +124,6 @@ final class StreamController: ObservableObject {
     }
 
     func start() {
-<<<<<<< HEAD
-        guard !isStreaming && !isBusy else { return }
-        streamCommands.update(state: "starting")
-=======
         startStream { _ in }
     }
 
@@ -156,7 +142,6 @@ final class StreamController: ObservableObject {
         case .stopped, .error:
             startCompletions.append(completion)
         }
->>>>>>> 8a85150c3ad6bccc935b1ed9d8350131bb627c28
         configuration = preset.configuration
         errorMessage = nil; droppedFrames = 0; actualBitrate = 0; actualFrameRate = 0
         _ = counters.take()
@@ -170,12 +155,8 @@ final class StreamController: ObservableObject {
                 guard granted else {
                     self.isBusy = false
                     self.errorMessage = "Camera access denied. Enable it in Settings."
-<<<<<<< HEAD
-                    self.streamCommands.update(state: "error")
-=======
                     self.transition(to: .error, message: self.errorMessage)
                     self.finishStart(.failure(.init(code: "camera_access_denied", message: self.errorMessage!)))
->>>>>>> 8a85150c3ad6bccc935b1ed9d8350131bb627c28
                     return
                 }
                 self.startPipeline(token: token, configuration: self.configuration)
@@ -185,19 +166,11 @@ final class StreamController: ObservableObject {
 
     private func startPipeline(token: Int, configuration: VideoStreamConfiguration) {
         let counters = self.counters
-        let streamCommands = self.streamCommands
         worker.async { [weak self] in
             guard let self else { return }
-            let existingControlServer = self.controlServer
-            let camera = self.camera ?? CameraCapture()
+            let camera = CameraCapture()
             let encoder = H264Encoder()
-<<<<<<< HEAD
-            let server = RTSPServer(port: configuration.rtspPort)
-            var controlServer = existingControlServer
-            let preserveControlServer = existingControlServer != nil
-=======
             let server = RTSPServer(port: configuration.rtspPort, rtpPayloadSize: configuration.rtpPayloadSize)
->>>>>>> 8a85150c3ad6bccc935b1ed9d8350131bb627c28
             do {
                 guard let address = Self.localAddress(interface: configuration.controlInterface) else {
                     throw StreamError.message("No IPv4 address on \(configuration.controlInterface). Connect to Wi-Fi before starting.")
@@ -226,19 +199,6 @@ final class StreamController: ObservableObject {
                 server.onError = { [weak self] message in
                     DispatchQueue.main.async { self?.fail(message, token: token) }
                 }
-<<<<<<< HEAD
-                if controlServer == nil {
-                    let control = CameraControlServer(address: address, port: configuration.controlPort,
-                        handler: CameraCommandHandler(camera: camera, stream: streamCommands))
-                    control.onError = { [weak self] message in
-                        DispatchQueue.main.async { self?.fail(message, token: token) }
-                    }
-                    controlServer = control
-                }
-                try server.start()
-                if !preserveControlServer { try controlServer?.start() }
-                self.camera = camera; self.encoder = encoder; self.server = server; self.controlServer = control
-=======
                 let imageTransfer = ImageTransferServer(address: address, port: configuration.imageTransferPort)
                 imageTransfer.onError = { [weak self] message in DispatchQueue.main.async { self?.errorMessage = message } }
                 try imageTransfer.start()
@@ -251,7 +211,6 @@ final class StreamController: ObservableObject {
                 }
                 try server.start()
                 self.camera = camera; self.encoder = encoder; self.server = server; self.imageTransferServer = imageTransfer; self.remoteCamera = remoteCamera
->>>>>>> 8a85150c3ad6bccc935b1ed9d8350131bb627c28
                 camera.run()
                 DispatchQueue.main.async {
                     guard self.generation == token else {
@@ -259,7 +218,6 @@ final class StreamController: ObservableObject {
                         return
                     }
                     self.isBusy = false; self.isStreaming = true
-                    self.streamCommands.update(state: "ready")
                     self.url = Self.localURL(port: configuration.rtspPort)
                     self.lastStatistics = Date()
                     self.timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
@@ -269,40 +227,17 @@ final class StreamController: ObservableObject {
                     self.finishStart(.success(self.currentStreamStatus()))
                 }
             } catch {
-<<<<<<< HEAD
-                if !preserveControlServer { controlServer?.stop() }
-                server.stop(); camera.stop(retainDevice: preserveControlServer); encoder.stop()
-                if !preserveControlServer { self.camera = nil; self.controlServer = nil }
-                DispatchQueue.main.async {
-                    guard self.generation == token else { return }
-                    self.isBusy = false; self.errorMessage = error.localizedDescription
-                    self.streamCommands.update(state: "error")
-=======
                 server.stop(); self.imageTransferServer?.stop(); self.imageTransferServer = nil; camera.stop(); encoder.stop()
                 DispatchQueue.main.async {
                     guard self.generation == token else { return }
                     self.isBusy = false; self.errorMessage = error.localizedDescription
                     self.transition(to: .error, message: error.localizedDescription)
                     self.finishStart(.failure(.init(code: "stream_start_failed", message: error.localizedDescription)))
->>>>>>> 8a85150c3ad6bccc935b1ed9d8350131bb627c28
                 }
             }
         }
     }
 
-<<<<<<< HEAD
-    func stop(keepControlServer: Bool = false) {
-        guard isStreaming || isBusy else {
-            if !keepControlServer {
-                worker.async { [weak self] in
-                    self?.controlServer?.stop(); self?.controlServer = nil
-                    self?.camera?.stop(); self?.camera = nil
-                }
-            }
-            return
-        }
-        streamCommands.update(state: "stopping")
-=======
     func stop() {
         stopStream { _ in }
     }
@@ -322,7 +257,6 @@ final class StreamController: ObservableObject {
         if wasStarting {
             finishStart(.failure(.init(code: "stream_start_cancelled", message: "Stream start was cancelled by stopStream.")))
         }
->>>>>>> 8a85150c3ad6bccc935b1ed9d8350131bb627c28
         generation += 1
         let token = generation
         isStreaming = false; isBusy = true
@@ -331,19 +265,6 @@ final class StreamController: ObservableObject {
         clientCount = 0; url = ""
         worker.async { [weak self] in
             guard let self else { return }
-<<<<<<< HEAD
-            if !keepControlServer {
-                self.controlServer?.stop(); self.controlServer = nil
-            }
-            self.server?.stop(); self.server = nil
-            self.camera?.stop(retainDevice: keepControlServer)
-            if !keepControlServer { self.camera = nil }
-            self.encoder?.stop(); self.encoder = nil
-            DispatchQueue.main.async {
-                if self.generation == token {
-                    self.isBusy = false
-                    self.streamCommands.update(state: "stopped")
-=======
             self.remoteCamera = nil
             self.server?.stop(); self.server = nil
             self.imageTransferServer?.stop(); self.imageTransferServer = nil
@@ -357,7 +278,6 @@ final class StreamController: ObservableObject {
                 if self.startAfterStop {
                     self.startAfterStop = false
                     self.startStream { _ in }
->>>>>>> 8a85150c3ad6bccc935b1ed9d8350131bb627c28
                 }
             }
         }

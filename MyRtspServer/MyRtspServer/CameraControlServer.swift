@@ -123,11 +123,7 @@ final class CameraControlServer {
     private func rejectOversized(_ client: Client) {
         client.closing = true
         let error = CameraResponse.Failure(code: "line_too_long", message: "Request exceeds the line limit.")
-<<<<<<< HEAD
-        send(CameraResponse(id: nil, ok: false, status: nil, streamStatus: nil, commands: nil, error: error), to: client, close: true)
-=======
         send(.failure(id: nil, CameraControlError(code: error.code, message: error.message)), to: client, close: true)
->>>>>>> 8a85150c3ad6bccc935b1ed9d8350131bb627c28
     }
 
     private func send(_ response: CameraResponse, to client: Client, close: Bool = false) {
