@@ -145,6 +145,7 @@ protocol CameraRemoteControlling: AnyObject {
     func setTorch(level: Float) throws -> CameraTorchStatus
     func keepAwakeStatus() throws -> CameraKeepAwakeStatus
     func setKeepAwake(enabled: Bool) throws -> CameraKeepAwakeStatus
+    func capturePhoto(format: PhotoFormat, completion: @escaping (Result<PhotoTransferInfo, CameraControlError>) -> Void)
 }
 
 private struct CameraCommand: Decodable {
@@ -160,9 +161,10 @@ private struct CameraCommand: Decodable {
     let position: Double?
     let level: Double?
     let cameraPosition: String?
+    let format: PhotoFormat?
 
     enum CodingKeys: String, CodingKey {
-        case command, factor, speed, width, height, fps, bitrate, enabled, mode, position, level
+        case command, factor, speed, width, height, fps, bitrate, enabled, mode, position, level, format
     }
 
     init(from decoder: Decoder) throws {
@@ -179,6 +181,7 @@ private struct CameraCommand: Decodable {
         position = try? container.decode(Double.self, forKey: .position)
         cameraPosition = try? container.decode(String.self, forKey: .position)
         level = try container.decodeIfPresent(Double.self, forKey: .level)
+        format = try container.decodeIfPresent(PhotoFormat.self, forKey: .format)
     }
 }
 
@@ -199,6 +202,7 @@ struct CameraResponse: Encodable {
     let event: String?
     let commands: [String]?
     let error: Failure?
+    let photo: PhotoTransferInfo?
 
     struct Quality: Encodable {
         let requestedBitrate: Int
@@ -219,16 +223,17 @@ struct CameraResponse: Encodable {
         commands: [String]? = nil,
         stream: CameraStreamStatus? = nil,
         event: String? = nil
+        , photo: PhotoTransferInfo? = nil
     ) -> Self {
         .init(id: id, ok: true, status: status, capabilities: capabilities, videoModes: videoModes, quality: quality,
               cameras: cameras, zoom: zoom, focus: focus, torch: torch, keepAwake: keepAwake, stream: stream, event: event,
-              commands: commands, error: nil)
+              commands: commands, error: nil, photo: photo)
     }
 
     static func failure(id: CameraRequestID?, _ error: CameraControlError) -> Self {
         .init(id: id, ok: false, status: nil, capabilities: nil, videoModes: nil, quality: nil, cameras: nil, zoom: nil,
               focus: nil, torch: nil, keepAwake: nil, stream: nil, event: nil, commands: nil,
-              error: .init(code: error.code, message: error.message))
+              error: .init(code: error.code, message: error.message), photo: nil)
     }
 }
 
@@ -261,7 +266,16 @@ final class CameraCommandHandler {
                 )))
                 return
             }
-            completion(Self.handle(data, client: client, camera: camera))
+            if let capture = Self.captureRequest(data) {
+                camera.capturePhoto(format: capture.format) { result in
+                    switch result {
+                    case let .success(photo): completion(.success(id: capture.id, photo: photo))
+                    case let .failure(error): completion(.failure(id: capture.id, error))
+                    }
+                }
+            } else {
+                completion(Self.handle(data, client: client, camera: camera))
+            }
         }
     }
 
@@ -351,7 +365,7 @@ final class CameraCommandHandler {
             guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
                 throw CameraControlError(code: "invalid_request", message: "Expected a JSON object.")
             }
-            let allowed = Set(["id", "command", "factor", "speed", "width", "height", "fps", "bitrate", "enabled", "mode", "position", "level"])
+            let allowed = Set(["id", "command", "factor", "speed", "width", "height", "fps", "bitrate", "enabled", "mode", "position", "level", "format"])
             guard Set(object.keys).isSubset(of: allowed) else {
                 throw CameraControlError(code: "invalid_request", message: "Unknown request field.")
             }
@@ -457,10 +471,18 @@ final class CameraCommandHandler {
     private static func noParameters(_ request: CameraCommand) throws {
         guard request.factor == nil, request.speed == nil, request.width == nil, request.height == nil, request.fps == nil,
               request.bitrate == nil, request.enabled == nil, request.mode == nil, request.position == nil, request.level == nil,
-              request.cameraPosition == nil else { throw invalidParameters() }
+              request.cameraPosition == nil, request.format == nil else { throw invalidParameters() }
     }
 
     private static func invalidParameters() -> CameraControlError {
         CameraControlError(code: "invalid_parameters", message: "Invalid parameters for command.")
+    }
+
+    private static func captureRequest(_ data: Data) -> (id: CameraRequestID?, format: PhotoFormat)? {
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              object["command"] as? String == "capturePhoto",
+              Set(object.keys).isSubset(of: ["id", "command", "format"]),
+              let request = try? JSONDecoder().decode(CameraCommand.self, from: data) else { return nil }
+        return (requestID(from: data), request.format ?? .jpeg)
     }
 }

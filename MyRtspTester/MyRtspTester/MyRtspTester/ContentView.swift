@@ -6,6 +6,7 @@ struct ContentView: View {
     @StateObject private var videoPlayer = GStreamerPlayerViewModel()
     @StateObject private var discovery = CameraDiscovery()
     @Environment(\.scenePhase) private var scenePhase
+    @State private var photoZoom: CGFloat = 1
 
     var body: some View {
         HStack(alignment: .top, spacing: 16) {
@@ -19,6 +20,7 @@ struct ContentView: View {
                     connectionSection
                     discoveredCamerasSection
                     playbackControlsSection
+                    photoControlsSection
                     if let errorMessage = viewModel.errorMessage {
                         Label(errorMessage, systemImage: "exclamationmark.triangle.fill")
                             .foregroundStyle(.red).font(.callout).fixedSize(horizontal: false, vertical: true)
@@ -71,47 +73,49 @@ struct ContentView: View {
     }
 
     private var videoPreviewSection: some View {
-        GroupBox("RTSP Video") {
+        GroupBox(viewModel.isShowingPhoto ? "Captured Photo" : "RTSP Video") {
             VStack(alignment: .leading, spacing: 10) {
-                ZStack {
-                    GStreamerVideoView(player: videoPlayer)
-                    if videoPlayer.playbackState != .playing {
-                        Label(videoPlayer.playbackState.label, systemImage: videoPlayer.playbackState.symbol)
-                            .foregroundStyle(.white.opacity(0.85))
-                            .padding(8)
-                            .background(.black.opacity(0.45), in: Capsule())
+                if viewModel.isShowingPhoto, let image = viewModel.capturedImage {
+                    ScrollView([.horizontal, .vertical]) {
+                        Image(nsImage: image)
+                            .resizable()
+                            .interpolation(.none)
+                            .frame(width: image.size.width * photoZoom, height: image.size.height * photoZoom)
                     }
-                }
-                .aspectRatio(16 / 9, contentMode: .fit)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .clipShape(RoundedRectangle(cornerRadius: 6))
-
-                HStack {
-                    Label(videoPlayer.playbackState.label, systemImage: videoPlayer.playbackState.symbol)
-                        .foregroundStyle(videoStatusColor)
-                    Spacer()
-                    Text("\(videoPlayer.actualResolution) @ \(videoPlayer.negotiatedFrameRate, specifier: "%.1f") fps")
-                        .monospacedDigit()
-                }
-
-                if let error = videoPlayer.lastError {
-                    Label(error, systemImage: "exclamationmark.triangle.fill")
-                        .font(.caption)
-                        .foregroundStyle(.red)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                HStack(spacing: 12) {
-                    Text("Incoming \(videoPlayer.measuredFrameRate, specifier: "%.1f") fps")
-                    Text("Reconnects \(videoPlayer.reconnectionCount)")
-                    if let lastFrameTime = videoPlayer.lastFrameTime {
-                        Text("Last frame \(lastFrameTime.formatted(date: .omitted, time: .standard))")
+                    .background(.black)
+                    .gesture(MagnificationGesture().onChanged { photoZoom = min(max($0, 0.1), 8) })
+                    HStack {
+                        Text("\(viewModel.capturedPhoto?.width ?? 0) × \(viewModel.capturedPhoto?.height ?? 0)")
+                        Spacer()
+                        Button("Return to Live Video") { viewModel.showLiveVideo() }
                     }
+                } else {
+                    ZStack {
+                        GStreamerVideoView(player: videoPlayer)
+                        if videoPlayer.playbackState != .playing {
+                            Label(videoPlayer.playbackState.label, systemImage: videoPlayer.playbackState.symbol)
+                                .foregroundStyle(.white.opacity(0.85)).padding(8).background(.black.opacity(0.45), in: Capsule())
+                        }
+                    }
+                    .aspectRatio(16 / 9, contentMode: .fit).frame(maxWidth: .infinity, maxHeight: .infinity).clipShape(RoundedRectangle(cornerRadius: 6))
                 }
-                .font(.caption)
-                .foregroundStyle(.secondary)
             }
         }
     }
+
+    private var photoControlsSection: some View {
+            GroupBox("Photo Capture") {
+                HStack {
+                    Picker("Format", selection: $viewModel.photoFormat) {
+                        ForEach(PhotoFormat.allCases) { Text($0.label).tag($0) }
+                    }.pickerStyle(.segmented)
+                    Button(viewModel.isCapturingPhoto ? "Capturing…" : "Capture Photo") { viewModel.capturePhoto() }
+                        .disabled(!viewModel.canCapturePhoto)
+                    Button("Save Image") { viewModel.saveCapturedPhoto() }
+                        .disabled(viewModel.capturedPhoto == nil)
+                }
+            }
+        }
 
     private var playbackControlsSection: some View {
         GroupBox("Playback Controls") {

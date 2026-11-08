@@ -5,15 +5,17 @@ final class RemoteCameraController: CameraRemoteControlling {
     private let camera: CameraCapture
     private let encoder: H264Encoder
     private let server: RTSPServer
+    private let imageTransfer: ImageTransferServer
     private let stateLock = NSLock()
     private var configuration: VideoStreamConfiguration
     private var effectiveBitrate: Int?
     var configurationDidChange: ((VideoStreamConfiguration) -> Void)?
 
-    init(camera: CameraCapture, encoder: H264Encoder, server: RTSPServer, configuration: VideoStreamConfiguration) {
+    init(camera: CameraCapture, encoder: H264Encoder, server: RTSPServer, imageTransfer: ImageTransferServer, configuration: VideoStreamConfiguration) {
         self.camera = camera
         self.encoder = encoder
         self.server = server
+        self.imageTransfer = imageTransfer
         self.configuration = configuration
         effectiveBitrate = encoder.effectiveBitrate()
     }
@@ -29,7 +31,8 @@ final class RemoteCameraController: CameraRemoteControlling {
         let commands = [
             "status", "capabilities", "getStatus", "getCapabilities", "setZoom", "rampZoom", "stopZoom",
             "getVideoModes", "setVideoMode", "getQuality", "setQuality", "getKeepAwake", "setKeepAwake",
-            "setFocusMode", "setFocus", "getCameras", "setCamera", "getZoomCapabilities", "setTorch", "setTorchLevel"
+            "setFocusMode", "setFocus", "getCameras", "setCamera", "getZoomCapabilities", "setTorch", "setTorchLevel",
+            "capturePhoto"
         ]
         return .init(commands: commands, status: try status(), cameras: camera.availableCameras(), videoModes: try camera.supportedVideoModes(),
                      focus: try camera.focusStatus(), torch: try camera.torchStatus(), zoom: try camera.zoomStatus())
@@ -121,6 +124,12 @@ final class RemoteCameraController: CameraRemoteControlling {
             UIApplication.shared.isIdleTimerDisabled = enabled
         }
         return .init(enabled: enabled)
+    }
+
+    func capturePhoto(format: PhotoFormat, completion: @escaping (Result<PhotoTransferInfo, CameraControlError>) -> Void) {
+        camera.capturePhoto(format: format) { [imageTransfer] result in
+            completion(result.map { imageTransfer.register($0) })
+        }
     }
 
     static func applySavedKeepAwakePreference() {

@@ -9,6 +9,7 @@ enum CameraCommand: String, Codable, Sendable {
     case getCameras, setCamera, getZoomCapabilities
     case setTorch, setTorchLevel
     case startStream, stopStream, getStreamStatus
+    case capturePhoto
 }
 
 struct CameraControlRequest: Encodable, Sendable {
@@ -25,6 +26,7 @@ struct CameraControlRequest: Encodable, Sendable {
     let focusPosition: Double?
     let cameraPosition: String?
     let level: Double?
+    let format: PhotoFormat?
 
     static func status(id: String) -> Self { .init(id: id, command: .status) }
     static func capabilities(id: String) -> Self { .init(id: id, command: .capabilities) }
@@ -44,14 +46,15 @@ struct CameraControlRequest: Encodable, Sendable {
 
     init(id: String, command: CameraCommand, factor: Double? = nil, speed: Double? = nil, width: Int? = nil,
          height: Int? = nil, fps: Int? = nil, bitrate: Int? = nil, enabled: Bool? = nil, mode: String? = nil,
-         focusPosition: Double? = nil, cameraPosition: String? = nil, level: Double? = nil) {
+         focusPosition: Double? = nil, cameraPosition: String? = nil, level: Double? = nil, format: PhotoFormat? = nil) {
         self.id = id; self.command = command; self.factor = factor; self.speed = speed; self.width = width; self.height = height
         self.fps = fps; self.bitrate = bitrate; self.enabled = enabled; self.mode = mode; self.focusPosition = focusPosition
         self.cameraPosition = cameraPosition; self.level = level
+        self.format = format
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, command, factor, speed, width, height, fps, bitrate, enabled, mode, position, level
+        case id, command, factor, speed, width, height, fps, bitrate, enabled, mode, position, level, format
     }
 
     func encode(to encoder: Encoder) throws {
@@ -69,7 +72,22 @@ struct CameraControlRequest: Encodable, Sendable {
         try container.encodeIfPresent(focusPosition, forKey: .position)
         try container.encodeIfPresent(cameraPosition, forKey: .position)
         try container.encodeIfPresent(level, forKey: .level)
+        try container.encodeIfPresent(format, forKey: .format)
     }
+}
+
+enum PhotoFormat: String, Codable, Sendable, CaseIterable, Identifiable {
+    case jpeg, bgra
+    var id: String { rawValue }
+    var label: String { rawValue.uppercased() }
+}
+
+struct PhotoTransferInfo: Codable, Sendable {
+    let transferId: String
+    let transferHost: String
+    let transferPort: UInt16
+    let transferToken: String
+    let format: PhotoFormat
 }
 
 struct CameraControlErrorResponse: Codable, Sendable, LocalizedError {
@@ -188,4 +206,5 @@ struct CameraControlResponse: Codable, Sendable {
     let event: String?
     let commands: [String]?
     let error: CameraControlErrorResponse?
+    let photo: PhotoTransferInfo?
 }

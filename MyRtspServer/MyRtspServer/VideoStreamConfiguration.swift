@@ -9,6 +9,7 @@ struct VideoStreamConfiguration: Equatable {
     var rtpPayloadSize = 1200
     var rtspPort: UInt16 = 8554
     var controlPort: UInt16 = 8555
+    var imageTransferPort: UInt16 = 8556
     var controlInterface = "en0"
 
     enum Preset: String, CaseIterable, Identifiable {
@@ -27,7 +28,8 @@ struct VideoStreamConfiguration: Equatable {
     var isValid: Bool {
         width > 0 && height > 0 && width <= Int(Int32.max) && height <= Int(Int32.max) &&
         frameRate > 0 && frameRate <= Int(Int32.max) && bitrate > 0 && keyframeInterval > 0 && rtspPort > 0 &&
-        controlPort > 0 && controlPort != rtspPort && !controlInterface.isEmpty &&
+        controlPort > 0 && imageTransferPort > 0 && controlPort != rtspPort && imageTransferPort != rtspPort &&
+        imageTransferPort != controlPort && !controlInterface.isEmpty &&
         rtpPayloadSize >= 3 && rtpPayloadSize <= 65_523
     }
 }

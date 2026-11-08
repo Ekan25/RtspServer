@@ -1,6 +1,8 @@
 import Combine
+import AppKit
 import Foundation
 import SwiftUI
+import UniformTypeIdentifiers
 
 @MainActor
 final class CameraViewModel: ObservableObject {
@@ -34,9 +36,15 @@ final class CameraViewModel: ObservableObject {
     @Published var autoStream: Bool { didSet { defaults.set(autoStream, forKey: Keys.autoStream) } }
     @Published private(set) var streamStatus: CameraStreamStatus?
     @Published private(set) var selectedCameraID: UUID?
+    @Published var photoFormat: PhotoFormat = .jpeg
+    @Published private(set) var capturedPhoto: CapturedPhoto?
+    @Published private(set) var capturedImage: NSImage?
+    @Published private(set) var isCapturingPhoto = false
+    @Published var isShowingPhoto = false
 
     private let defaults: UserDefaults
     private let client = CameraControlClient()
+    private let photoReceiver = PhotoTransferReceiver()
     private var eventTask: Task<Void, Never>?
     private var sliderTask: Task<Void, Never>?
     private var reconnectTask: Task<Void, Never>?
@@ -78,6 +86,7 @@ final class CameraViewModel: ObservableObject {
     var canSetTorch: Bool { isConnected && can(.setTorch) && (status?.torch.available ?? false) }
     var canStartStream: Bool { isConnected && streamStatus?.state != .running && streamStatus?.state != .starting }
     var canStopStream: Bool { isConnected && streamStatus?.state != .stopped && streamStatus?.state != .stopping }
+    var canCapturePhoto: Bool { isConnected && can(.capturePhoto) && !isCapturingPhoto }
     var shouldAutoConnect: Bool { autoConnect && !manualDisconnect && selectedCameraID != nil }
 
     func connect() {
@@ -134,6 +143,46 @@ final class CameraViewModel: ObservableObject {
             } catch {
                 show(error)
             }
+
+        }
+    }
+
+    func capturePhoto() {
+        guard canCapturePhoto else { return }
+        isCapturingPhoto = true
+        errorMessage = nil
+        Task {
+            do {
+                let response = try await client.request(.init(id: requestID(), command: .capturePhoto, format: photoFormat), timeout: .seconds(30))
+                guard let info = response.photo else { throw CameraControlClientError.invalidResponse("The camera did not provide photo transfer information.") }
+                let photo = try await photoReceiver.receive(info)
+                let image = try await Task.detached(priority: .userInitiated) { try photo.image() }.value
+                capturedPhoto = photo; capturedImage = image; isShowingPhoto = true
+            } catch { show(error) }
+            isCapturingPhoto = false
+        }
+    }
+
+    func showLiveVideo() { isShowingPhoto = false }
+
+    func saveCapturedPhoto() {
+        guard let photo = capturedPhoto else { return }
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = "capture-\(Self.timestamp()).\(photo.format == .jpeg ? "jpg" : "png")"
+        panel.allowedContentTypes = photo.format == .jpeg ? [.jpeg] : [.png]
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        Task {
+            do {
+                let data: Data
+                if photo.format == .jpeg { data = photo.data }
+                else {
+                    let image = try await Task.detached(priority: .userInitiated) { try photo.image() }.value
+                    guard let tiff = image.tiffRepresentation, let bitmap = NSBitmapImageRep(data: tiff),
+                          let png = bitmap.representation(using: .png, properties: [:]) else { throw PhotoTransferError.invalidImage }
+                    data = png
+                }
+                try data.write(to: url, options: .atomic)
+            } catch { show(error) }
         }
     }
 
@@ -387,6 +436,10 @@ final class CameraViewModel: ObservableObject {
 
     private func show(_ error: Error) { errorMessage = error.localizedDescription }
     private func requestID() -> String { UUID().uuidString }
+    private static func timestamp() -> String {
+        let formatter = DateFormatter(); formatter.dateFormat = "yyyyMMdd-HHmmss"
+        return formatter.string(from: Date())
+    }
 
     private enum Keys {
         static let host = "cameraControl.host"

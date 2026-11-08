@@ -1,14 +1,18 @@
 import AVFoundation
+import CoreImage
 
 final class CameraCapture: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
     private let session = AVCaptureSession()
     private let output = AVCaptureVideoDataOutput()
+    private let photoOutput = AVCapturePhotoOutput()
+    private let photoContext = CIContext()
     private let captureQueue = DispatchQueue(label: "camera.frames", qos: .userInitiated)
     private let configurationQueue = DispatchQueue(label: "camera.configuration", qos: .userInitiated)
     private var device: AVCaptureDevice?
     private var input: AVCaptureDeviceInput?
     private var configuration: VideoStreamConfiguration?
     private var rampOwner: UUID?
+    private var photoDelegate: PhotoDelegate?
     var onFrame: ((CVPixelBuffer, CMTime, FrameTrace) -> Void)?
     var onDrop: (() -> Void)?
     var makeTrace: (() -> FrameTrace)?
@@ -41,6 +45,8 @@ final class CameraCapture: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
             device = nil
             input = nil
             configuration = nil
+            photoDelegate?.finish(.failure(CameraControlError(code: "capture_cancelled", message: "Camera capture stopped.")))
+            photoDelegate = nil
         }
     }
 
@@ -204,6 +210,7 @@ final class CameraCapture: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
             guard device.hasTorch, device.isTorchModeSupported(.on), level.isFinite, level >= 0, level <= 1 else {
                 throw CameraControlError(code: "out_of_range", message: "Torch level is not supported by the active camera.")
             }
+
             try device.lockForConfiguration()
             if level == 0 {
                 device.torchMode = .off
@@ -212,6 +219,27 @@ final class CameraCapture: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
             }
             device.unlockForConfiguration()
             return Self.torchSnapshot(device)
+        }
+    }
+
+    func capturePhoto(format: PhotoFormat, completion: @escaping (Result<CapturedPhotoData, CameraControlError>) -> Void) {
+        configurationQueue.async {
+            guard self.configuration != nil else { completion(.failure(self.unavailable())); return }
+            guard self.photoDelegate == nil else {
+                completion(.failure(.init(code: "capture_in_progress", message: "A photo capture is already in progress.")))
+                return
+            }
+            let settings: AVCapturePhotoSettings
+            switch format {
+            case .jpeg: settings = AVCapturePhotoSettings(format: [AVVideoCodecKey: AVVideoCodecType.jpeg])
+            case .bgra: settings = AVCapturePhotoSettings(format: [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA])
+            }
+            settings.maxPhotoDimensions = self.photoOutput.maxPhotoDimensions
+            let delegate = PhotoDelegate(format: format, context: self.photoContext) { [weak self] result in
+                self?.configurationQueue.async { self?.photoDelegate = nil; completion(result) }
+            }
+            self.photoDelegate = delegate
+            self.photoOutput.capturePhoto(with: settings, delegate: delegate)
         }
     }
 
@@ -244,6 +272,11 @@ final class CameraCapture: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
             session.addOutput(output)
             if let connection = output.connection(with: .video), connection.isVideoStabilizationSupported {
                 connection.preferredVideoStabilizationMode = .off
+            }
+            if !session.outputs.contains(photoOutput) {
+                guard session.canAddOutput(photoOutput) else { throw StreamError.message("Unable to configure photo capture.") }
+                session.addOutput(photoOutput)
+                photoOutput.isHighResolutionCaptureEnabled = true
             }
         }
         try device.lockForConfiguration()
@@ -350,6 +383,77 @@ final class CameraCapture: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
 
     private func unavailable() -> CameraControlError {
         CameraControlError(code: "unavailable", message: "Camera is not available.")
+    }
+
+    private final class PhotoDelegate: NSObject, AVCapturePhotoCaptureDelegate {
+        private let format: PhotoFormat
+        private let context: CIContext
+        private let completion: (Result<CapturedPhotoData, CameraControlError>) -> Void
+        private var didFinish = false
+
+        init(format: PhotoFormat, context: CIContext, completion: @escaping (Result<CapturedPhotoData, CameraControlError>) -> Void) {
+            self.format = format
+            self.context = context
+            self.completion = completion
+        }
+
+        func photoOutput(_ output: AVCapturePhotoOutput, didFinishProcessingPhoto photo: AVCapturePhoto, error: Error?) {
+            if let error {
+                finish(.failure(.init(code: "capture_failed", message: error.localizedDescription)))
+                return
+            }
+            switch format {
+            case .jpeg:
+                guard let data = photo.fileDataRepresentation(), !data.isEmpty else {
+                    finish(.failure(.init(code: "capture_failed", message: "Camera returned no JPEG data.")))
+                    return
+                }
+                guard let image = CIImage(data: data) else {
+                    finish(.failure(.init(code: "capture_failed", message: "Camera returned invalid JPEG data.")))
+                    return
+                }
+                finish(.success(.init(format: .jpeg, width: Int(image.extent.width), height: Int(image.extent.height), rowStride: 0, bytes: data)))
+            case .bgra:
+                guard let source = photo.pixelBuffer else {
+                    finish(.failure(.init(code: "capture_failed", message: "Camera returned no processed pixel buffer.")))
+                    return
+                }
+                let width = CVPixelBufferGetWidth(source), height = CVPixelBufferGetHeight(source)
+                let pixelBuffer: CVPixelBuffer
+                if CVPixelBufferGetPixelFormatType(source) == kCVPixelFormatType_32BGRA {
+                    pixelBuffer = source
+                } else {
+                    var converted: CVPixelBuffer?
+                    let attributes = [kCVPixelBufferIOSurfacePropertiesKey: [:]] as CFDictionary
+                    guard CVPixelBufferCreate(kCFAllocatorDefault, width, height, kCVPixelFormatType_32BGRA, attributes, &converted) == kCVReturnSuccess,
+                          let converted else {
+                        finish(.failure(.init(code: "capture_failed", message: "Unable to allocate BGRA photo buffer.")))
+                        return
+                    }
+                    context.render(CIImage(cvPixelBuffer: source), to: converted)
+                    pixelBuffer = converted
+                }
+                CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
+                defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly) }
+                guard let base = CVPixelBufferGetBaseAddress(pixelBuffer) else {
+                    finish(.failure(.init(code: "capture_failed", message: "Photo pixel buffer is unavailable.")))
+                    return
+                }
+                let stride = CVPixelBufferGetBytesPerRow(pixelBuffer)
+                finish(.success(.init(format: .bgra, width: width, height: height, rowStride: stride,
+                                     bytes: Data(bytes: base, count: stride * height))))
+            }
+        }
+
+        func photoOutput(_ output: AVCapturePhotoOutput, didFinishCaptureFor resolvedSettings: AVCaptureResolvedPhotoSettings, error: Error?) {
+            if let error { finish(.failure(.init(code: "capture_failed", message: error.localizedDescription))) }
+        }
+
+        func finish(_ result: Result<CapturedPhotoData, CameraControlError>) {
+            guard !didFinish else { return }
+            didFinish = true
+            completion(result)
+        }
     }
 }
 

@@ -92,6 +92,7 @@ final class StreamController: ObservableObject {
     private var encoder: H264Encoder?
     private var server: RTSPServer?
     private var controlServer: CameraControlServer?
+    private var imageTransferServer: ImageTransferServer?
     private var remoteCamera: RemoteCameraController?
     private var generation = 0
     private var timer: Timer?
@@ -198,7 +199,10 @@ final class StreamController: ObservableObject {
                 server.onError = { [weak self] message in
                     DispatchQueue.main.async { self?.fail(message, token: token) }
                 }
-                let remoteCamera = RemoteCameraController(camera: camera, encoder: encoder, server: server, configuration: configuration)
+                let imageTransfer = ImageTransferServer(address: address, port: configuration.imageTransferPort)
+                imageTransfer.onError = { [weak self] message in DispatchQueue.main.async { self?.errorMessage = message } }
+                try imageTransfer.start()
+                let remoteCamera = RemoteCameraController(camera: camera, encoder: encoder, server: server, imageTransfer: imageTransfer, configuration: configuration)
                 remoteCamera.configurationDidChange = { [weak self] updated in
                     DispatchQueue.main.async {
                         guard self?.generation == token else { return }
@@ -206,11 +210,11 @@ final class StreamController: ObservableObject {
                     }
                 }
                 try server.start()
-                self.camera = camera; self.encoder = encoder; self.server = server; self.remoteCamera = remoteCamera
+                self.camera = camera; self.encoder = encoder; self.server = server; self.imageTransferServer = imageTransfer; self.remoteCamera = remoteCamera
                 camera.run()
                 DispatchQueue.main.async {
                     guard self.generation == token else {
-                        server.stop(); camera.stop(); encoder.stop()
+                        server.stop(); imageTransfer.stop(); camera.stop(); encoder.stop()
                         return
                     }
                     self.isBusy = false; self.isStreaming = true
@@ -223,7 +227,7 @@ final class StreamController: ObservableObject {
                     self.finishStart(.success(self.currentStreamStatus()))
                 }
             } catch {
-                server.stop(); camera.stop(); encoder.stop()
+                server.stop(); self.imageTransferServer?.stop(); self.imageTransferServer = nil; camera.stop(); encoder.stop()
                 DispatchQueue.main.async {
                     guard self.generation == token else { return }
                     self.isBusy = false; self.errorMessage = error.localizedDescription
@@ -263,6 +267,7 @@ final class StreamController: ObservableObject {
             guard let self else { return }
             self.remoteCamera = nil
             self.server?.stop(); self.server = nil
+            self.imageTransferServer?.stop(); self.imageTransferServer = nil
             self.camera?.stop(); self.camera = nil
             self.encoder?.stop(); self.encoder = nil
             DispatchQueue.main.async {
@@ -305,6 +310,7 @@ final class StreamController: ObservableObject {
             guard let self else { return }
             self.remoteCamera = nil
             self.server?.stop(); self.server = nil
+            self.imageTransferServer?.stop(); self.imageTransferServer = nil
             self.camera?.stop(); self.camera = nil
             self.encoder?.stop(); self.encoder = nil
             DispatchQueue.main.async {
