@@ -71,6 +71,17 @@ internal static class Program
             Check(settings.RootElement.GetProperty("Host").GetString() == "127.0.0.1" &&
                   settings.RootElement.GetProperty("Port").GetInt32() == camera.Port, "connection settings saved");
         }
+                ui.AutoConnect.IsChecked = true;
+                ui.AutoStream.IsChecked = true;
+                using (var settings = JsonDocument.Parse(File.ReadAllText(ui.SettingsPath)))
+                {
+                        Check(settings.RootElement.GetProperty("AutoConnect").GetBoolean() &&
+                                    settings.RootElement.GetProperty("AutoStream").GetBoolean() &&
+                                    settings.RootElement.GetProperty("LatencyMilliseconds").GetUInt32() == 20,
+                                "automation and latency settings saved");
+                }
+                ui.AutoStream.IsChecked = false;
+                ui.AutoConnect.IsChecked = false;
         camera.Commands = new[] { "status", "rampZoom", "stopZoom" };
         await ui.Disconnect();
         await ui.Connect(camera);
@@ -246,6 +257,8 @@ internal static class Program
         private T Find<T>(string name) where T : class => (T)Window.FindName(name);
         public Slider Slider => Find<Slider>("ZoomSlider");
         public Slider Speed => Find<Slider>("SpeedSlider");
+        public CheckBox AutoConnect => Find<CheckBox>("AutoConnectCheckBox");
+        public CheckBox AutoStream => Find<CheckBox>("AutoStreamCheckBox");
         public Button In => Find<Button>("ZoomInButton");
         public Button Out => Find<Button>("ZoomOutButton");
         public Button Refresh => Find<Button>("RefreshButton");

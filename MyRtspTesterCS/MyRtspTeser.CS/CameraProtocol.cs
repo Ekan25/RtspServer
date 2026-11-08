@@ -27,6 +27,9 @@ public sealed class CameraResponse
     [JsonPropertyName("status")]
     public CameraStatus? Status { get; init; }
 
+    [JsonPropertyName("streamStatus")]
+    public CameraStreamStatus? StreamStatus { get; init; }
+
     [JsonPropertyName("commands")]
     public string[]? Commands { get; init; }
 
@@ -35,6 +38,18 @@ public sealed class CameraResponse
 
     [JsonExtensionData]
     public Dictionary<string, JsonElement> Properties { get; init; } = new();
+}
+
+public sealed class CameraStreamStatus
+{
+    [JsonPropertyName("state")]
+    public string State { get; init; } = "stopped";
+
+    [JsonPropertyName("isReady")]
+    public bool IsReady { get; init; }
+
+    [JsonPropertyName("isStreaming")]
+    public bool IsStreaming { get; init; }
 }
 
 public sealed class CameraStatus

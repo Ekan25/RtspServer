@@ -4,7 +4,7 @@ using CameraController;
 internal static class Program
 {
     private const string Status = """{"factor":2.5,"minFactor":1.0,"maxFactor":8.0,"isRamping":true,"deviceName":"Loopback camera","switchOverFactors":[2.0,4.0]}""";
-    private static readonly string[] Commands = ["status", "capabilities", "setZoom", "rampZoom", "stopZoom"];
+    private static readonly string[] Commands = ["status", "capabilities", "setZoom", "rampZoom", "stopZoom", "startStream", "stopStream"];
     private static readonly TimeSpan TestTimeout = TimeSpan.FromSeconds(8);
 
     private static async Task<int> Main()
@@ -83,6 +83,7 @@ internal static class Program
             id,
             ok = true,
             status = JsonSerializer.Deserialize<JsonElement>(Status),
+            streamStatus = new { state = "ready", isReady = true, isStreaming = true },
             commands = capabilities ? Commands : null
         });
 
@@ -95,6 +96,7 @@ internal static class Program
         Check(status.IsRamping, "Incorrect ramp state.");
         Check(status.DeviceName == "Loopback camera", "Incorrect device.");
         Check(status.SwitchOverFactors.SequenceEqual([2.0, 4.0]), "Incorrect switch-over factors.");
+        Check(response.StreamStatus is { State: "ready", IsReady: true, IsStreaming: true }, "Incorrect stream status.");
     }
 
     private static async Task CommandsAndResponses(CancellationToken token)

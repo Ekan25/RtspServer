@@ -1,10 +1,13 @@
 using System.ComponentModel;
+using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using System.Windows.Media.Imaging;
+using System.Windows.Threading;
 
 namespace CameraController;
 
@@ -22,6 +25,22 @@ public partial class MainWindow : Window
     private bool _closing;
     private bool _allowClose;
     private bool _connectionFailed;
+    private bool _settingsLoaded;
+    private volatile bool _suppressAutoConnect;
+    private volatile bool _playbackRequested;
+    private bool _suppressAutoStream;
+    private CancellationTokenSource? _autoConnectCancellation;
+    private Task? _autoConnectTask;
+    private CancellationTokenSource? _playbackCancellation;
+    private Task? _playbackTask;
+    private readonly object _renderLock = new();
+    private byte[]? _renderBuffer;
+    private RtspVideoPlayer.RtspFrameInfo _latestFrameInfo;
+    private ulong _renderedSequence;
+    private int _renderPending;
+    private WriteableBitmap? _videoBitmap;
+    private readonly Action _renderLatestFrameAction;
+    private PlaybackState _playbackState = PlaybackState.Disconnected;
 
     private static string DefaultSettingsPath => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
@@ -36,6 +55,7 @@ public partial class MainWindow : Window
     {
         _settingsPath = settingsPath;
         InitializeComponent();
+        _renderLatestFrameAction = RenderLatestFrame;
         _client.ConnectionChanged += Client_ConnectionChanged;
         _client.Error += Client_Error;
         LoadSettings();
@@ -51,6 +71,9 @@ public partial class MainWindow : Window
                 ?? throw new JsonException("Connection settings are empty.");
             HostTextBox.Text = settings.Host;
             PortTextBox.Text = settings.Port.ToString(CultureInfo.InvariantCulture);
+            AutoConnectCheckBox.IsChecked = settings.AutoConnect;
+            AutoStreamCheckBox.IsChecked = settings.AutoStream;
+            LatencyTextBox.Text = settings.LatencyMilliseconds.ToString(CultureInfo.InvariantCulture);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
         {
@@ -61,7 +84,139 @@ public partial class MainWindow : Window
     private void SaveSettings(string host, int port)
     {
         Directory.CreateDirectory(Path.GetDirectoryName(_settingsPath)!);
-        File.WriteAllText(_settingsPath, JsonSerializer.Serialize(new ConnectionSettings(host, port)));
+        File.WriteAllText(_settingsPath, JsonSerializer.Serialize(new ConnectionSettings
+        {
+            Host = host,
+            Port = port,
+            AutoConnect = AutoConnectCheckBox.IsChecked == true,
+            AutoStream = AutoStreamCheckBox.IsChecked == true,
+            LatencyMilliseconds = ParseLatency()
+        }));
+    }
+
+    private void Window_Loaded(object sender, RoutedEventArgs e)
+    {
+        _settingsLoaded = true;
+        if (AutoConnectCheckBox.IsChecked == true)
+            StartAutoConnectLoop();
+        UpdateControls();
+    }
+
+    private void AutoConnect_Changed(object sender, RoutedEventArgs e)
+    {
+        if (!_settingsLoaded)
+            return;
+        SaveCurrentSettings();
+        if (AutoConnectCheckBox.IsChecked == true)
+        {
+            _suppressAutoConnect = false;
+            StartAutoConnectLoop();
+        }
+        else
+            CancelAutoConnectLoop();
+    }
+
+    private void AutoStream_Changed(object sender, RoutedEventArgs e)
+    {
+        if (!_settingsLoaded)
+            return;
+        SaveCurrentSettings();
+        if (AutoStreamCheckBox.IsChecked == true && _session is { } session && IsCurrent(session))
+        {
+            _suppressAutoStream = false;
+            StartPlayback();
+        }
+    }
+
+    private void SaveCurrentSettings()
+    {
+        if (!int.TryParse(PortTextBox.Text, NumberStyles.None, CultureInfo.InvariantCulture, out int port) ||
+            port is < 1 or > 65535)
+            return;
+        try { _ = ParseLatency(); }
+        catch (ArgumentException) { return; }
+        try { SaveSettings(HostTextBox.Text.Trim(), port); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            ErrorTextBlock.Text = $"Could not save settings: {ex.Message}";
+        }
+    }
+
+    private void StartAutoConnectLoop()
+    {
+        if (_closing || _suppressAutoConnect || AutoConnectCheckBox.IsChecked != true ||
+            _client.IsConnected || _autoConnectTask is { IsCompleted: false })
+            return;
+
+        _autoConnectCancellation?.Cancel();
+        _autoConnectCancellation?.Dispose();
+        var cancellation = new CancellationTokenSource();
+        _autoConnectCancellation = cancellation;
+        _autoConnectTask = AutoConnectLoopAsync(cancellation.Token);
+    }
+
+    private void CancelAutoConnectLoop()
+    {
+        _autoConnectCancellation?.Cancel();
+        _autoConnectCancellation = null;
+    }
+
+    private async Task AutoConnectLoopAsync(CancellationToken cancellationToken)
+    {
+        bool autoConnectEnabled = AutoConnectCheckBox.IsChecked == true;
+        string host = HostTextBox.Text.Trim();
+        if (!autoConnectEnabled || string.IsNullOrWhiteSpace(host) ||
+            !int.TryParse(PortTextBox.Text, NumberStyles.None, CultureInfo.InvariantCulture, out int port) ||
+            port is < 1 or > 65535)
+            return;
+
+        TimeSpan retryDelay = TimeSpan.FromSeconds(2);
+        while (!cancellationToken.IsCancellationRequested && !_closing && !_suppressAutoConnect &&
+             autoConnectEnabled && !_client.IsConnected)
+        {
+            try
+            {
+                await Dispatcher.InvokeAsync(() =>
+                {
+                    _connecting = true;
+                    UpdateControls();
+                    ErrorTextBlock.Text = "";
+                });
+                await _client.ConnectAsync(host, port, cancellationToken).ConfigureAwait(false);
+                await Dispatcher.InvokeAsync(() =>
+                {
+                    if (_closing || !_client.IsConnected)
+                        return;
+                    _connecting = false;
+                    _connectionFailed = false;
+                    ClearSession();
+                    _session = new CameraSession();
+                    UpdateControls();
+                    _ = InitializeCameraAsync(_session);
+                });
+                return;
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                return;
+            }
+            catch (Exception ex)
+            {
+                await Dispatcher.InvokeAsync(() =>
+                {
+                    if (!_closing && !_suppressAutoConnect)
+                    {
+                        _connecting = false;
+                        _connectionFailed = true;
+                        ErrorTextBlock.Text = $"Auto Connect: {ex.Message}";
+                        UpdateControls();
+                    }
+                });
+                try { await Task.Delay(retryDelay, cancellationToken).ConfigureAwait(false); }
+                catch (OperationCanceledException) { return; }
+                retryDelay = TimeSpan.FromSeconds(Math.Min(retryDelay.TotalSeconds * 2, 15));
+            }
+        }
     }
 
     private async void ConnectionButton_Click(object sender, RoutedEventArgs e)
@@ -76,13 +231,17 @@ public partial class MainWindow : Window
         {
             if (_client.IsConnected)
             {
+                _suppressAutoConnect = true;
+                CancelAutoConnectLoop();
                 CancelSlider();
                 await StopContinuousZoomAsync();
+                await StopPlaybackAsync(sendServerStop: true);
                 ClearSession();
                 await _client.DisconnectAsync();
             }
             else
             {
+                CancelAutoConnectLoop();
                 string host = HostTextBox.Text.Trim();
                 if (string.IsNullOrWhiteSpace(host))
                     throw new ArgumentException("Enter an IP address or hostname.");
@@ -90,6 +249,9 @@ public partial class MainWindow : Window
                     port is < 1 or > 65535)
                     throw new ArgumentException("Enter a TCP port from 1 to 65535.");
 
+                _ = ParseLatency();
+                _suppressAutoConnect = false;
+                _suppressAutoStream = false;
                 SaveSettings(host, port);
                 HostTextBox.Text = host;
                 _connecting = true;
@@ -136,7 +298,324 @@ public partial class MainWindow : Window
         }
         session.Commands = new HashSet<string>(capabilities.Commands, StringComparer.Ordinal);
         UpdateControls();
-        await RunCommandAsync(session, "status", revision: session.Revision);
+        var status = await RunCommandAsync(session, "status", revision: session.Revision);
+        if (status is not null && AutoStreamCheckBox.IsChecked == true && !_suppressAutoStream && IsCurrent(session))
+            StartPlayback();
+    }
+
+    private void PlaybackButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_playbackRequested)
+            _ = StopPlaybackAsync(sendServerStop: true);
+        else
+        {
+            _suppressAutoStream = false;
+            StartPlayback();
+        }
+    }
+
+    private void StartPlayback()
+    {
+        if (_closing || _playbackRequested || _session is not { } session || !IsCurrent(session))
+            return;
+        if (!session.Commands.Contains("startStream") || !session.Commands.Contains("stopStream"))
+        {
+            ErrorTextBlock.Text = "The camera does not support remote stream control.";
+            return;
+        }
+
+        uint latency;
+        try { latency = ParseLatency(); }
+        catch (ArgumentException ex)
+        {
+            ErrorTextBlock.Text = ex.Message;
+            return;
+        }
+
+        string host = HostTextBox.Text.Trim();
+        string url = new UriBuilder("rtsp", host, 8554, "camera").Uri.AbsoluteUri;
+        _playbackRequested = true;
+        _playbackCancellation = CancellationTokenSource.CreateLinkedTokenSource(
+            session.Token, _windowCancellation.Token);
+        CancellationToken token = _playbackCancellation.Token;
+        _playbackTask = Task.Run(() => PlaybackLoopAsync(session, url, latency, token));
+        UpdateControls();
+    }
+
+    private async Task StopPlaybackAsync(bool sendServerStop)
+    {
+        CameraSession? session = _session;
+        _playbackRequested = false;
+        if (sendServerStop)
+            _suppressAutoStream = true;
+        _playbackCancellation?.Cancel();
+        if (_playbackTask is { } task)
+        {
+            try { await task; }
+            catch (Exception ex) { Trace.TraceWarning($"Playback shutdown failed: {ex.Message}"); }
+        }
+        _playbackCancellation?.Dispose();
+        _playbackCancellation = null;
+        _playbackTask = null;
+
+        if (sendServerStop && session is not null && IsCurrent(session) && session.Commands.Contains("stopStream"))
+        {
+            try { await RunStreamCommandAsync(session, "stopStream", CancellationToken.None); }
+            catch (Exception ex) { ErrorTextBlock.Text = $"Could not stop the camera stream: {ex.Message}"; }
+        }
+        await SetPlaybackStateAsync(_client.IsConnected ? PlaybackState.Stopped : PlaybackState.Disconnected);
+    }
+
+    private async Task PlaybackLoopAsync(CameraSession session, string url, uint latency, CancellationToken cancellationToken)
+    {
+        int failures = 0;
+        while (!cancellationToken.IsCancellationRequested && _playbackRequested &&
+               !session.Token.IsCancellationRequested && _client.IsConnected)
+        {
+            try
+            {
+                await SetPlaybackStateAsync(failures == 0 ? PlaybackState.Connecting : PlaybackState.Reconnecting);
+                await WaitForStreamReadyAsync(session, cancellationToken).ConfigureAwait(false);
+
+                using var player = new RtspVideoPlayer();
+                Trace.TraceInformation($"RTSP connect attempt: {url}, latency={latency}ms.");
+                await Task.Run(() => player.Start(url, latency), CancellationToken.None).ConfigureAwait(false);
+
+                bool receivedFrame = false;
+                bool enteredPlaying = false;
+                long lastFrameTimestamp = Stopwatch.GetTimestamp();
+                long attemptStarted = Stopwatch.GetTimestamp();
+                while (_playbackRequested && !cancellationToken.IsCancellationRequested &&
+                       !session.Token.IsCancellationRequested && _client.IsConnected)
+                {
+                    while (player.TryPollEvent(out var playerEvent))
+                    {
+                        TracePlayerEvent(playerEvent);
+                        if (playerEvent.Type is 3 or 4)
+                            throw new IOException(playerEvent.Message ?? "The GStreamer pipeline ended.");
+                    }
+
+                    int result;
+                    RtspVideoPlayer.RtspFrameInfo frameInfo;
+                    lock (_renderLock)
+                    {
+                        byte[] destination = _renderBuffer ?? Array.Empty<byte>();
+                        result = player.CopyLatestFrame(destination, out frameInfo);
+                        if (result == -2)
+                        {
+                            int frameBytes = checked((int)(frameInfo.Stride * frameInfo.Height));
+                            if (_renderBuffer is null || _renderBuffer.Length != frameBytes)
+                                _renderBuffer = new byte[frameBytes];
+                            result = player.CopyLatestFrame(_renderBuffer, out frameInfo);
+                        }
+                        if (result == 1)
+                            _latestFrameInfo = frameInfo;
+                    }
+
+                    if (result < 0)
+                        throw new IOException("Could not retrieve a decoded video frame.");
+                    if (result == 1)
+                    {
+                        receivedFrame = true;
+                        lastFrameTimestamp = Stopwatch.GetTimestamp();
+                        QueueFrameRender();
+                        failures = 0;
+                        if (!enteredPlaying)
+                        {
+                            enteredPlaying = true;
+                            await SetPlaybackStateAsync(PlaybackState.Playing).ConfigureAwait(false);
+                        }
+                    }
+                    else if (!receivedFrame && Stopwatch.GetElapsedTime(attemptStarted).TotalSeconds > 20)
+                        throw new TimeoutException("No decoded video frames arrived within 20 seconds.");
+                    else if (receivedFrame && Stopwatch.GetElapsedTime(lastFrameTimestamp).TotalSeconds > 5)
+                    {
+                        Trace.TraceWarning("RTSP playback stalled; replacing the pipeline.");
+                        throw new TimeoutException("Video frames stopped arriving for 5 seconds.");
+                    }
+
+                    await Task.Delay(16, cancellationToken).ConfigureAwait(false);
+                }
+
+                if (!_client.IsConnected || session.Token.IsCancellationRequested)
+                    break;
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                break;
+            }
+            catch (Exception ex)
+            {
+                if (cancellationToken.IsCancellationRequested || session.Token.IsCancellationRequested)
+                    break;
+                failures++;
+                Trace.TraceError($"RTSP playback failure: {ex.Message}");
+                await SetPlaybackStateAsync(PlaybackState.Error, ex.Message).ConfigureAwait(false);
+                if (!_playbackRequested)
+                    break;
+                await SetPlaybackStateAsync(PlaybackState.Reconnecting).ConfigureAwait(false);
+                int delayMilliseconds = Math.Min(500 * (1 << Math.Min(failures, 4)), 8000);
+                Trace.TraceInformation($"RTSP reconnect attempt {failures} in {delayMilliseconds} ms.");
+                try { await Task.Delay(delayMilliseconds, cancellationToken).ConfigureAwait(false); }
+                catch (OperationCanceledException) { break; }
+            }
+        }
+
+        if (!_closing)
+            await SetPlaybackStateAsync(_client.IsConnected ? PlaybackState.Stopped : PlaybackState.Disconnected);
+        await Dispatcher.InvokeAsync(() =>
+        {
+            if (_playbackCancellation?.Token == cancellationToken)
+            {
+                _playbackCancellation.Dispose();
+                _playbackCancellation = null;
+                _playbackTask = null;
+            }
+        }).Task.ConfigureAwait(false);
+    }
+
+    private async Task WaitForStreamReadyAsync(CameraSession session, CancellationToken cancellationToken)
+    {
+        CameraResponse status = await RunStreamCommandAsync(session, "status", cancellationToken).ConfigureAwait(false);
+        CameraStreamStatus stream = status.StreamStatus
+            ?? throw new InvalidDataException("The camera did not report stream readiness.");
+        if (stream.IsReady)
+            return;
+        if (stream.State is "stopped" or "error")
+            await RunStreamCommandAsync(session, "startStream", cancellationToken).ConfigureAwait(false);
+
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(TimeSpan.FromSeconds(30));
+        while (true)
+        {
+            await Task.Delay(250, timeout.Token).ConfigureAwait(false);
+            status = await RunStreamCommandAsync(session, "status", timeout.Token).ConfigureAwait(false);
+            stream = status.StreamStatus
+                ?? throw new InvalidDataException("The camera did not report stream readiness.");
+            if (stream.IsReady)
+                return;
+            if (stream.State == "error")
+                throw new IOException("The camera could not start its video stream.");
+            if (stream.State == "stopped")
+                await RunStreamCommandAsync(session, "startStream", timeout.Token).ConfigureAwait(false);
+        }
+    }
+
+    private async Task<CameraResponse> RunStreamCommandAsync(
+        CameraSession session, string command, CancellationToken cancellationToken)
+    {
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(session.Token, cancellationToken);
+        await session.CommandLock.WaitAsync(linked.Token).ConfigureAwait(false);
+        try
+        {
+            CameraResponse response = await _client.SendCommandAsync(command, cancellationToken: linked.Token)
+                .ConfigureAwait(false);
+            await Dispatcher.InvokeAsync(() =>
+            {
+                if (IsCurrent(session))
+                    ApplyResponse(session, response, null);
+            }).Task.ConfigureAwait(false);
+            return response;
+        }
+        finally
+        {
+            session.CommandLock.Release();
+        }
+    }
+
+    private void TracePlayerEvent(RtspVideoPlayer.RtspPlayerEvent playerEvent)
+    {
+        string message = playerEvent.Message ?? "";
+        switch (playerEvent.Type)
+        {
+            case 1:
+                Trace.TraceInformation(message);
+                break;
+            case 2:
+                Trace.TraceWarning(message);
+                break;
+            case 3:
+                Trace.TraceError(message);
+                break;
+            case 4:
+                Trace.TraceWarning(message);
+                break;
+            case 5:
+                Trace.TraceInformation(message);
+                break;
+        }
+    }
+
+    private void QueueFrameRender()
+    {
+        if (Interlocked.Exchange(ref _renderPending, 1) == 0)
+            _ = Dispatcher.BeginInvoke(DispatcherPriority.Render, _renderLatestFrameAction);
+    }
+
+    private void RenderLatestFrame()
+    {
+        try
+        {
+            lock (_renderLock)
+            {
+                var info = _latestFrameInfo;
+                if (_renderBuffer is null || info.Width == 0 || info.Height == 0)
+                    return;
+                if (_videoBitmap is null || _videoBitmap.PixelWidth != info.Width || _videoBitmap.PixelHeight != info.Height)
+                {
+                    _videoBitmap = new WriteableBitmap((int)info.Width, (int)info.Height, 96, 96,
+                        System.Windows.Media.PixelFormats.Bgra32, null);
+                    VideoImage.Source = _videoBitmap;
+                    Trace.TraceInformation($"WPF video surface resized to {info.Width}x{info.Height}.");
+                }
+                _videoBitmap.WritePixels(new Int32Rect(0, 0, (int)info.Width, (int)info.Height),
+                    _renderBuffer, checked((int)(info.Stride * info.Height)), (int)info.Stride);
+                _renderedSequence = info.Sequence;
+                VideoStateTextBlock.Visibility = Visibility.Collapsed;
+                double frameRate = info.FrameRateDenominator == 0 ? 0 :
+                    (double)info.FrameRateNumerator / info.FrameRateDenominator;
+                VideoInfoTextBlock.Text = $"{info.Width} x {info.Height} at {frameRate:0.##} fps";
+            }
+        }
+        finally
+        {
+            Interlocked.Exchange(ref _renderPending, 0);
+            bool newerFrame;
+            lock (_renderLock)
+                newerFrame = _latestFrameInfo.Sequence != _renderedSequence;
+            if (newerFrame)
+                QueueFrameRender();
+        }
+    }
+
+    private Task SetPlaybackStateAsync(PlaybackState state, string? detail = null) =>
+        Dispatcher.InvokeAsync(() =>
+        {
+            if (_closing && state != PlaybackState.Stopped)
+                return;
+            _playbackState = state;
+            VideoStateTextBlock.Text = state switch
+            {
+                PlaybackState.Disconnected => "Disconnected",
+                PlaybackState.Connecting => "Connecting...",
+                PlaybackState.Playing => "Playing",
+                PlaybackState.Reconnecting => "Reconnecting...",
+                PlaybackState.Stopped => "Stopped",
+                PlaybackState.Error => detail ?? "Playback error",
+                _ => "Disconnected"
+            };
+            VideoStateTextBlock.Visibility = state == PlaybackState.Playing ? Visibility.Collapsed : Visibility.Visible;
+            if (state == PlaybackState.Error && detail is not null)
+                ErrorTextBlock.Text = detail;
+            Trace.TraceInformation($"Playback state: {state}{(detail is null ? "" : $" ({detail})")}");
+            UpdateControls();
+        }).Task;
+
+    private uint ParseLatency()
+    {
+        if (!uint.TryParse(LatencyTextBox.Text, NumberStyles.None, CultureInfo.InvariantCulture, out uint latency) || latency > 5000)
+            throw new ArgumentException("Enter an RTSP latency from 0 to 5000 ms.");
+        return latency;
     }
 
     private async Task<CameraResponse?> RunCommandAsync(
@@ -464,7 +943,13 @@ public partial class MainWindow : Window
             if (_closing)
                 return;
             if (!_client.IsConnected)
+            {
+                _playbackRequested = false;
+                _playbackCancellation?.Cancel();
                 ClearSession();
+                if (!_suppressAutoConnect && AutoConnectCheckBox.IsChecked == true)
+                    StartAutoConnectLoop();
+            }
             UpdateControls();
         });
     }
@@ -487,6 +972,8 @@ public partial class MainWindow : Window
 
     private void ClearSession()
     {
+        _playbackRequested = false;
+        _playbackCancellation?.Cancel();
         CancelSlider();
         _session?.Cancellation.Cancel();
         _session = null;
@@ -502,6 +989,8 @@ public partial class MainWindow : Window
         SwitchOverTextBlock.Text = "";
         RampingTextBlock.Text = "";
         ZoomTextBlock.Text = "Current zoom: not reported";
+        if (!_client.IsConnected)
+            _ = SetPlaybackStateAsync(PlaybackState.Disconnected);
     }
 
     private void UpdateControls()
@@ -519,6 +1008,9 @@ public partial class MainWindow : Window
         SpeedSlider.IsEnabled = canRamp;
         ZoomInButton.IsEnabled = canRamp;
         ZoomOutButton.IsEnabled = canRamp;
+        bool canStream = available && _session!.Commands.Contains("startStream") && _session.Commands.Contains("stopStream");
+        PlaybackButton.IsEnabled = canStream;
+        PlaybackButton.Content = _playbackRequested ? "Stop video" : "Start video";
         StatusTextBlock.Text = _connecting ? "Connecting..." : connected ? "Connected" :
             _connectionFailed ? "Connection failed" : "Disconnected";
     }
@@ -535,11 +1027,15 @@ public partial class MainWindow : Window
 
         _closing = true;
         _windowCancellation.Cancel();
+        CancelAutoConnectLoop();
         CancelSlider();
         UpdateControls();
         try
         {
+            if (_autoConnectTask is { } autoConnectTask)
+                await autoConnectTask;
             await StopContinuousZoomAsync();
+            await StopPlaybackAsync(sendServerStop: true);
             ClearSession();
             _client.ConnectionChanged -= Client_ConnectionChanged;
             _client.Error -= Client_Error;
@@ -557,7 +1053,24 @@ public partial class MainWindow : Window
         }
     }
 
-    private sealed record ConnectionSettings(string Host, int Port);
+    private sealed class ConnectionSettings
+    {
+        public string Host { get; init; } = "";
+        public int Port { get; init; } = 8555;
+        public bool AutoConnect { get; init; }
+        public bool AutoStream { get; init; }
+        public uint LatencyMilliseconds { get; init; } = 20;
+    }
+
+    private enum PlaybackState
+    {
+        Disconnected,
+        Connecting,
+        Playing,
+        Reconnecting,
+        Stopped,
+        Error
+    }
 
     private sealed class CameraSession
     {

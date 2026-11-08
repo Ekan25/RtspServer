@@ -57,7 +57,7 @@ final class CameraCapture: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
 
     func run() { configurationQueue.sync { session.startRunning() } }
 
-    func stop() {
+    func stop(retainDevice: Bool = false) {
         configurationQueue.sync {
             if let device, device.isRampingVideoZoom, (try? device.lockForConfiguration()) != nil {
                 device.cancelVideoZoomRamp()
@@ -71,7 +71,7 @@ final class CameraCapture: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
             session.inputs.forEach { session.removeInput($0) }
             session.outputs.forEach { session.removeOutput($0) }
             session.commitConfiguration()
-            device = nil
+            if !retainDevice { device = nil }
         }
     }
 
